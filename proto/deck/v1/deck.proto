@@ -1,0 +1,345 @@
+syntax = "proto3";
+
+package deck.v1;
+
+option go_package = "github.com/local/linux-deck-daemon/pkg/protocol/v1;v1";
+option java_multiple_files = true;
+option java_package = "com.linuxdeck.client.protocol.v1";
+option java_outer_classname = "DeckProto";
+
+// Envelope wraps every control-channel message exchanged over WebSocket/mTLS.
+message Envelope {
+  string request_id = 1;
+  int64 timestamp_ms = 2;
+
+  oneof payload {
+    // Authentication & Control
+    HandshakeRequest handshake_request = 10;
+    HandshakeResponse handshake_response = 11;
+    Ping ping = 12;
+    Pong pong = 13;
+    ErrorResponse error_response = 14;
+
+    // Virtual Input (/dev/uinput)
+    MouseMoveEvent mouse_move_event = 20;
+    MouseButtonEvent mouse_button_event = 21;
+    MouseScrollEvent mouse_scroll_event = 22;
+    KeyEvent key_event = 23;
+    KeyComboEvent key_combo_event = 24;
+
+    // Macro Deck
+    MacroExecRequest macro_exec_request = 30;
+    MacroOutputEvent macro_output_event = 31;
+    MacroStateSync macro_state_sync = 32;
+    DeckProfileSync deck_profile_sync = 33;
+
+    // Interactive PTY Terminal
+    PtyOpenRequest pty_open_request = 40;
+    PtyDataEvent pty_data_event = 41;
+    PtyResizeEvent pty_resize_event = 42;
+    PtyCloseEvent pty_close_event = 43;
+
+    // System Telemetry, Media & Power
+    TelemetrySnapshot telemetry_snapshot = 50;
+    MediaControlCommand media_control_command = 51;
+    MediaStatusEvent media_status_event = 52;
+    PowerControlCommand power_control_command = 53;
+
+    // WebRTC Signaling
+    WebRtcSignal webrtc_signal = 60;
+  }
+}
+
+// ============================================================================
+// 1. Authentication & Session Control
+// ============================================================================
+
+enum SessionStatus {
+  SESSION_STATUS_UNSPECIFIED = 0;
+  SESSION_ACTIVE = 1;
+  SESSION_REJECTED = 2;
+  SESSION_VERSION_MISMATCH = 3;
+}
+
+message HandshakeRequest {
+  uint32 protocol_version = 1;
+  string device_id = 2;
+  string device_name = 3;
+  string client_version = 4;
+}
+
+message HandshakeResponse {
+  uint32 protocol_version = 1;
+  string device_name = 2;
+  string session_id = 3;
+  SessionStatus status = 4;
+  bool accepted = 5;
+  string message = 6;
+}
+
+message Ping {
+  uint64 seq = 1;
+  int64 client_timestamp_ms = 2;
+}
+
+message Pong {
+  uint64 seq = 1;
+  int64 client_timestamp_ms = 2;
+  int64 server_timestamp_ms = 3;
+}
+
+message ErrorResponse {
+  int32 code = 1;
+  string message = 2;
+  string ref_request_id = 3;
+}
+
+// ============================================================================
+// 2. Virtual Input (/dev/uinput)
+// ============================================================================
+
+enum MouseButton {
+  MOUSE_BUTTON_UNSPECIFIED = 0;
+  LEFT = 1;
+  RIGHT = 2;
+  MIDDLE = 3;
+  BACK = 4;
+  FORWARD = 5;
+}
+
+enum ButtonAction {
+  BUTTON_ACTION_UNSPECIFIED = 0;
+  PRESS = 1;
+  RELEASE = 2;
+  CLICK = 3;
+}
+
+message MouseMoveEvent {
+  // Relative movement delta in pixels (used when is_absolute == false).
+  int32 dx = 1;
+  int32 dy = 2;
+
+  // Normalized absolute coordinates in [0.0, 1.0] for Remote Desktop touch mode.
+  float norm_x = 3;
+  float norm_y = 4;
+
+  // Selects absolute positioning mode when true, or relative mode when false.
+  bool is_absolute = 5;
+}
+
+message MouseButtonEvent {
+  MouseButton button = 1;
+  ButtonAction action = 2;
+}
+
+message MouseScrollEvent {
+  int32 dx = 1;
+  int32 dy = 2;
+}
+
+message KeyEvent {
+  uint32 key_code = 1;
+  string key = 2;
+  ButtonAction action = 3;
+  repeated string modifiers = 4;
+}
+
+message KeyComboEvent {
+  // Human-readable key combo string (e.g. "SUPER+SHIFT+Q", "CTRL+ALT+T").
+  string combo = 1;
+  repeated string keys = 2;
+  string text = 3;
+}
+
+// ============================================================================
+// 3. Macro Deck
+// ============================================================================
+
+enum MacroRunState {
+  MACRO_RUN_STATE_UNSPECIFIED = 0;
+  IDLE = 1;
+  RUNNING = 2;
+  SUCCESS = 3;
+  ERROR = 4;
+}
+
+enum ButtonType {
+  BUTTON_TYPE_UNSPECIFIED = 0;
+  COMMAND = 1;
+  KEY_COMBO = 2;
+  MEDIA = 3;
+  TELEMETRY_WIDGET = 4;
+  FOLDER = 5;
+}
+
+message MacroExecRequest {
+  string button_id = 1;
+  string command = 2;
+  map<string, string> env = 3;
+  uint32 timeout_seconds = 4;
+  string working_dir = 5;
+}
+
+message MacroOutputEvent {
+  string button_id = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+}
+
+message MacroStateSync {
+  string button_id = 1;
+  MacroRunState state = 2;
+  int32 exit_code = 3;
+  string title = 4;
+  string color = 5;
+  string active_icon = 6;
+  string inactive_icon = 7;
+  bool is_active = 8;
+}
+
+message DeckButtonSpec {
+  string button_id = 1;
+  ButtonType type = 2;
+  int32 row = 3;
+  int32 col = 4;
+  int32 row_span = 5;
+  int32 col_span = 6;
+  string title = 7;
+  string color = 8;
+  string active_icon = 9;
+  string inactive_icon = 10;
+  string command = 11;
+  map<string, string> env = 12;
+  string key_combo = 13;
+  string media_action = 14;
+  string telemetry_metric = 15;
+  string target_folder_id = 16;
+  uint32 timeout_seconds = 17;
+}
+
+message DeckPageSpec {
+  string page_id = 1;
+  string title = 2;
+  int32 rows = 3;
+  int32 cols = 4;
+  repeated DeckButtonSpec buttons = 5;
+}
+
+message DeckProfileSync {
+  string profile_id = 1;
+  string name = 2;
+  int32 rows = 3;
+  int32 cols = 4;
+  repeated DeckPageSpec pages = 5;
+  string raw_json = 6;
+}
+
+// ============================================================================
+// 4. Interactive PTY Terminal
+// ============================================================================
+
+message PtyOpenRequest {
+  string session_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+  string shell = 4;
+  map<string, string> env = 5;
+}
+
+message PtyDataEvent {
+  string session_id = 1;
+  bytes data = 2;
+}
+
+message PtyResizeEvent {
+  string session_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+message PtyCloseEvent {
+  string session_id = 1;
+  int32 exit_code = 2;
+  string reason = 3;
+}
+
+// ============================================================================
+// 5. System Telemetry, Media (MPRIS2) & Power (logind)
+// ============================================================================
+
+message TelemetrySnapshot {
+  float cpu_percent = 1;
+  uint64 ram_used_mb = 2;
+  uint64 ram_total_mb = 3;
+  map<string, float> temperatures = 4;
+  float rx_kbps = 5;
+  float tx_kbps = 6;
+  MediaStatusEvent media_status = 7;
+}
+
+enum MediaCommandType {
+  MEDIA_COMMAND_TYPE_UNSPECIFIED = 0;
+  PLAY_PAUSE = 1;
+  PLAY = 2;
+  PAUSE = 3;
+  NEXT = 4;
+  PREVIOUS = 5;
+  STOP = 6;
+  VOLUME_UP = 7;
+  VOLUME_DOWN = 8;
+  MUTE = 9;
+}
+
+message MediaControlCommand {
+  MediaCommandType command = 1;
+  string player = 2;
+  float volume = 3;
+}
+
+message MediaStatusEvent {
+  string title = 1;
+  string artist = 2;
+  string album = 3;
+  bool is_playing = 4;
+  string player = 5;
+  float volume = 6;
+  int64 position_ms = 7;
+  int64 duration_ms = 8;
+}
+
+enum PowerAction {
+  POWER_ACTION_UNSPECIFIED = 0;
+  LOCK = 1;
+  UNLOCK = 2;
+  SUSPEND = 3;
+  REBOOT = 4;
+  POWEROFF = 5;
+}
+
+message PowerControlCommand {
+  PowerAction action = 1;
+}
+
+// ============================================================================
+// 6. WebRTC Signaling
+// ============================================================================
+
+enum SignalType {
+  SIGNAL_TYPE_UNSPECIFIED = 0;
+  START_STREAM = 1;
+  STOP_STREAM = 2;
+  SDP_OFFER = 3;
+  SDP_ANSWER = 4;
+  ICE_CANDIDATE = 5;
+}
+
+message WebRtcSignal {
+  SignalType type = 1;
+  string payload_json = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  uint32 fps = 5;
+  uint32 bitrate_kbps = 6;
+  bool audio_enabled = 7;
+}
+

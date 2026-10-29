@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://linuxdeck.local/schemas/deck/v1/profile_schema.json",
+  "title": "Linux Deck Profile Schema",
+  "description": "Schema defining Macro Deck profiles, pages, grid dimensions (rows x cols), buttons, and telemetry widgets.",
+  "type": "object",
+  "required": [
+    "profile_id",
+    "name",
+    "rows",
+    "cols",
+    "pages"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Profile schema version."
+    },
+    "profile_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for the Deck profile."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Display name of the profile."
+    },
+    "rows": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 12,
+      "default": 3,
+      "description": "Default number of grid rows per page."
+    },
+    "cols": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16,
+      "default": 5,
+      "description": "Default number of grid columns per page."
+    },
+    "pages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/page"
+      },
+      "description": "Ordered list of pages (or folders) in this Deck profile."
+    }
+  },
+  "$defs": {
+    "buttonType": {
+      "type": "string",
+      "enum": [
+        "COMMAND",
+        "KEY_COMBO",
+        "MEDIA",
+        "TELEMETRY_WIDGET",
+        "FOLDER"
+      ],
+      "description": "Functional category of the Deck button or widget."
+    },
+    "page": {
+      "type": "object",
+      "required": [
+        "page_id",
+        "title",
+        "buttons"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "page_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique identifier of the page or target folder."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable page or folder title."
+        },
+        "is_folder": {
+          "type": "boolean",
+          "default": false,
+          "description": "Indicates if this page is a nested folder opened via a FOLDER button."
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "Optional page-specific row override."
+        },
+        "cols": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16,
+          "description": "Optional page-specific column override."
+        },
+        "buttons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/button"
+          },
+          "description": "List of buttons and widgets positioned on this page's grid."
+        }
+      }
+    },
+    "button": {
+      "type": "object",
+      "required": [
+        "button_id",
+        "type",
+        "row",
+        "col",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "button_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique identifier for the button within the profile."
+        },
+        "type": {
+          "$ref": "#/$defs/buttonType"
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-based grid row index."
+        },
+        "col": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-based grid column index."
+        },
+        "row_span": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Number of rows occupied by this button/widget."
+        },
+        "col_span": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Number of columns occupied by this button/widget."
+        },
+        "title": {
+          "type": "string",
+          "description": "Display label rendered on the button."
+        },
+        "color": {
+          "type": "string",
+          "pattern": "^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{8})$",
+          "default": "#1E293B",
+          "description": "Hex color code (#RRGGBB or #AARRGGBB) for the button background."
+        },
+        "active_icon": {
+          "type": "string",
+          "description": "Icon identifier or name when the button is in active/running state."
+        },
+        "inactive_icon": {
+          "type": "string",
+          "description": "Icon identifier or name when the button is in idle/inactive state."
+        },
+        "command": {
+          "type": "string",
+          "description": "Shell command executed when type is COMMAND."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables injected into COMMAND execution."
+        },
+        "working_dir": {
+          "type": "string",
+          "description": "Working directory for COMMAND execution."
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 30,
+          "description": "Execution timeout in seconds for COMMAND buttons."
+        },
+        "poll_command": {
+          "type": "string",
+          "description": "Optional status polling command for toggle/status buttons."
+        },
+        "poll_interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Polling interval in seconds for dynamic button state."
+        },
+        "key_combo": {
+          "type": "string",
+          "description": "Shortcut expression (e.g. 'SUPER+SHIFT+Q', 'CTRL+ALT+T') when type is KEY_COMBO."
+        },
+        "media_action": {
+          "type": "string",
+          "enum": [
+            "PLAY_PAUSE",
+            "PLAY",
+            "PAUSE",
+            "NEXT",
+            "PREVIOUS",
+            "STOP",
+            "VOLUME_UP",
+            "VOLUME_DOWN",
+            "MUTE"
+          ],
+          "description": "MPRIS2/Audio action triggered when type is MEDIA."
+        },
+        "telemetry_metric": {
+          "type": "string",
+          "enum": [
+            "CPU",
+            "RAM",
+            "TEMPERATURE",
+            "NETWORK",
+            "ALL"
+          ],
+          "description": "Metric displayed when type is TELEMETRY_WIDGET."
+        },
+        "target_folder_id": {
+          "type": "string",
+          "description": "Target page_id to navigate to when type is FOLDER."
+        }
+      }
+    }
+  }
+}
+

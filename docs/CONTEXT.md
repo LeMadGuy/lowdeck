@@ -173,7 +173,7 @@ Os agentes devem atualizar o status abaixo ao finalizar e validar cada etapa:
 | **TASK-06** | Telemetria (`/proc`, `/sys`) e Integração D-Bus (`MPRIS2`/`logind`) | `TASK-01`, `TASK-03` | `[x] Concluída` |
 | **TASK-07** | Captura de Tela e Áudio de Baixa Latência (PipeWire + GStreamer) | `TASK-01`, `TASK-06` | `[x] Concluída` |
 | **TASK-08** | Integração WebRTC no Daemon (`pion/webrtc`) e Sinalização | `TASK-01`, `TASK-03`, `TASK-07` | `[x] Concluída` |
-| **TASK-09** | Android: Setup Gradle, Descoberta mDNS, Scanner QR e mTLS | `TASK-01` a `TASK-03` | `[ ] Pendente` |
+| **TASK-09** | Android: Setup Gradle, Descoberta mDNS, Scanner QR e mTLS | `TASK-01` a `TASK-03` | `[x] Concluída` |
 | **TASK-10** | Android: UI do Macro Deck Dinâmico e Widgets de Telemetria | `TASK-05`, `TASK-06`, `TASK-09` | `[ ] Pendente` |
 | **TASK-11** | Android: Trackpad Virtual Multi-gesto e Barra de Modificadores | `TASK-04`, `TASK-09` | `[ ] Pendente` |
 | **TASK-12** | Android: Desktop Remoto WebRTC e Mapeamento de Toque | `TASK-04`, `TASK-08`, `TASK-09`, `TASK-11` | `[ ] Pendente` |

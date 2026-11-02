@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+# Gradle Wrapper bootstrap script for LinuxDeck Android Client.
+set -e
+
+APP_HOME="$(cd "$(dirname "$0")" && pwd)"
+WRAPPER_JAR="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+WRAPPER_URL="https://raw.githubusercontent.com/gradle/gradle/v8.10.2/gradle/wrapper/gradle-wrapper.jar"
+
+if [ ! -f "$WRAPPER_JAR" ]; then
+    mkdir -p "$APP_HOME/gradle/wrapper"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$WRAPPER_URL" -o "$WRAPPER_JAR"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$WRAPPER_JAR" "$WRAPPER_URL"
+    else
+        echo "Error: gradle-wrapper.jar missing and neither curl nor wget is installed." >&2
+        exit 1
+    fi
+fi
+
+JAVACMD="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+if [ -z "$JAVA_HOME" ]; then
+    JAVACMD="java"
+fi
+
+exec "$JAVACMD" -Xmx64m -Xms64m \
+    -Dorg.gradle.appname="gradlew" \
+    -classpath "$WRAPPER_JAR" \
+    org.gradle.wrapper.GradleWrapperMain "$@"
+

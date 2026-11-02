@@ -169,10 +169,10 @@ Os agentes devem atualizar o status abaixo ao finalizar e validar cada etapa:
 | **TASK-02** | Autenticação mTLS 1.3, Certificados X.509 e Pareamento QR | `TASK-01` | `[x] Concluída` |
 | **TASK-03** | Descoberta mDNS e Servidor WebSocket/Protobuf Seguro | `TASK-01`, `TASK-02` | `[x] Concluída` |
 | **TASK-04** | Subsistema `/dev/uinput` (Mouse Rel/Abs e Teclado Virtual) | `TASK-01`, `TASK-03` | `[x] Concluída` |
-| **TASK-05** | Engine de Macros (Deck) e Terminal Interativo PTY | `TASK-01`, `TASK-03` | `[ ] Pendente` |
-| **TASK-06** | Telemetria (`/proc`, `/sys`) e Integração D-Bus (`MPRIS2`/`logind`) | `TASK-01`, `TASK-03` | `[ ] Pendente` |
-| **TASK-07** | Captura de Tela e Áudio de Baixa Latência (PipeWire + GStreamer) | `TASK-01`, `TASK-06` | `[ ] Pendente` |
-| **TASK-08** | Integração WebRTC no Daemon (`pion/webrtc`) e Sinalização | `TASK-01`, `TASK-03`, `TASK-07` | `[ ] Pendente` |
+| **TASK-05** | Engine de Macros (Deck) e Terminal Interativo PTY | `TASK-01`, `TASK-03` | `[x] Concluída` |
+| **TASK-06** | Telemetria (`/proc`, `/sys`) e Integração D-Bus (`MPRIS2`/`logind`) | `TASK-01`, `TASK-03` | `[x] Concluída` |
+| **TASK-07** | Captura de Tela e Áudio de Baixa Latência (PipeWire + GStreamer) | `TASK-01`, `TASK-06` | `[x] Concluída` |
+| **TASK-08** | Integração WebRTC no Daemon (`pion/webrtc`) e Sinalização | `TASK-01`, `TASK-03`, `TASK-07` | `[x] Concluída` |
 | **TASK-09** | Android: Setup Gradle, Descoberta mDNS, Scanner QR e mTLS | `TASK-01` a `TASK-03` | `[ ] Pendente` |
 | **TASK-10** | Android: UI do Macro Deck Dinâmico e Widgets de Telemetria | `TASK-05`, `TASK-06`, `TASK-09` | `[ ] Pendente` |
 | **TASK-11** | Android: Trackpad Virtual Multi-gesto e Barra de Modificadores | `TASK-04`, `TASK-09` | `[ ] Pendente` |

@@ -12,9 +12,15 @@ import (
 	"time"
 
 	"github.com/local/linux-deck-daemon/internal/auth"
+	"github.com/local/linux-deck-daemon/internal/dbus"
 	"github.com/local/linux-deck-daemon/internal/discovery"
 	"github.com/local/linux-deck-daemon/internal/input"
+	"github.com/local/linux-deck-daemon/internal/macro"
+	"github.com/local/linux-deck-daemon/internal/pty"
 	"github.com/local/linux-deck-daemon/internal/server"
+	"github.com/local/linux-deck-daemon/internal/telemetry"
+	"github.com/local/linux-deck-daemon/internal/webrtc"
+	pb "github.com/local/linux-deck-daemon/pkg/protocol/v1"
 )
 
 func main() {
@@ -89,6 +95,34 @@ func main() {
 	}()
 	input.NewHandler(inputInjector, logger).Register(router)
 
+	profileStore, err := macro.NewProfileStore(*configDir)
+	if err != nil {
+		logger.Error("failed to initialize macro profile store", "err", err)
+		os.Exit(1)
+	}
+	macroEngine := macro.NewEngine(profileStore, logger)
+	macroEngine.Register(router)
+
+	ptyMgr := pty.NewManager(pty.DefaultMaxSessionsPerClient, logger)
+	ptyMgr.Register(router)
+
+	mediaCtrl := dbus.NewMediaController(logger)
+	mediaCtrl.Register(router)
+
+	powerCtrl := dbus.NewPowerController(logger)
+	powerCtrl.Register(router)
+
+	webrtcSig := webrtc.NewSignalingHandler(*configDir, nil, logger)
+	webrtcSig.Register(router)
+
+	telemetryCollector := telemetry.NewCollector(telemetry.Config{
+		Interval: telemetry.DefaultInterval,
+		MediaProvider: func(c context.Context) (*pb.MediaStatusEvent, error) {
+			return mediaCtrl.GetStatus(c, "")
+		},
+		Logger: logger,
+	})
+
 	wsSrv, err := server.NewServer(server.Config{
 		ListenAddr:     fmt.Sprintf("0.0.0.0:%d", *port),
 		ServerIdentity: serverIdentity,
@@ -101,11 +135,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	wsSrv.OnConnect(func(client server.ClientSession) {
+		_ = macroEngine.SendProfileToClient(client)
+	})
+	wsSrv.OnDisconnect(func(client server.ClientSession) {
+		ptyMgr.CloseClientSessions(client.ID())
+		webrtcSig.CloseClientStream(client.ID())
+	})
+
 	listenAddr, err := wsSrv.Start(ctx)
 	if err != nil {
 		logger.Error("failed to start mTLS WebSocket server", "err", err)
 		os.Exit(1)
 	}
+
+	telemetryCollector.Start(ctx, wsSrv.ClientCount, wsSrv.Broadcast)
 
 	mdnsAdv, err := discovery.NewMdnsAdvertiser(discovery.Config{
 		Port:              *port,
@@ -130,6 +174,9 @@ func main() {
 	if mdnsAdv != nil {
 		mdnsAdv.Shutdown()
 	}
+	webrtcSig.CloseAll()
+	ptyMgr.CloseAll()
+	macroEngine.Wait()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_ = wsSrv.Shutdown(shutdownCtx)

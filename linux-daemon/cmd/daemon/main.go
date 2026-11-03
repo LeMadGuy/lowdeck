@@ -187,6 +187,8 @@ func main() {
 	}
 
 	mjpegSrv := capture.NewMjpegServer(fmt.Sprintf("0.0.0.0:%d", *screenPort), logger)
+	webTerm := pty.NewWebTerminal(logger)
+	webTerm.RegisterRoutes(mjpegSrv)
 	mjpegAddr, err := mjpegSrv.Start(ctx)
 	if err != nil {
 		logger.Warn("failed to start continuous mjpeg screen stream server", "err", err, "port", *screenPort)

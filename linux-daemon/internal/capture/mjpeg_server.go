@@ -29,6 +29,7 @@ const (
 // MjpegServer serves a continuous HTTP multipart MJPEG stream (/screen.mjpg).
 type MjpegServer struct {
 	addr       string
+	mux        *http.ServeMux
 	server     *http.Server
 	listener   net.Listener
 	logger     *slog.Logger
@@ -46,12 +47,14 @@ func NewMjpegServer(addr string, logger *slog.Logger) *MjpegServer {
 		logger = slog.Default()
 	}
 
+	mux := http.NewServeMux()
+
 	s := &MjpegServer{
 		addr:   addr,
+		mux:    mux,
 		logger: logger,
 	}
 
-	mux := http.NewServeMux()
 	mux.HandleFunc(DefaultMjpegPath, s.handleScreenMjpeg)
 	mux.HandleFunc("/screen.mjpeg", s.handleScreenMjpeg)
 	mux.HandleFunc("/live.mjpg", s.handleScreenMjpeg)
@@ -66,6 +69,11 @@ func NewMjpegServer(addr string, logger *slog.Logger) *MjpegServer {
 	}
 
 	return s
+}
+
+// HandleFunc registers an HTTP handler function on the server mux before starting.
+func (s *MjpegServer) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	s.mux.HandleFunc(pattern, handler)
 }
 
 // Start binds the socket and starts the HTTP server in a background goroutine.

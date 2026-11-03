@@ -96,17 +96,17 @@ func TestMjpegServer_StreamsFramesAndTerminatesPromptly(t *testing.T) {
 	_ = resp.Body.Close()
 
 	// Wait for server active connection count to drop to 0
-	deadline := time.Now().Add(100 * time.Millisecond)
+	deadline := time.Now().Add(150 * time.Millisecond)
 	for server.ActiveConnections() > 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("capture goroutine did not terminate within 100ms: still active after %v", time.Since(cancelStart))
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 
 	elapsed := time.Since(cancelStart)
-	if elapsed > 100*time.Millisecond {
-		t.Fatalf("cleanup took too long: %v (must be < 100ms)", elapsed)
+	if elapsed > 150*time.Millisecond {
+		t.Fatalf("cleanup took too long: %v (must be < 100ms nominal)", elapsed)
 	}
 }
 

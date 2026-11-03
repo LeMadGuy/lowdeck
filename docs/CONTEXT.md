@@ -236,5 +236,5 @@ Os agentes devem executar os arquivos de especificação abaixo em ordem e marca
 | ID | Arquivo de Especificação | Problema Resolvido | Status |
 | :--- | :--- | :--- | :--- |
 | **FIX-01** | `docs/fixes/FIX-01-UDP-FASTLANE.md` | Picos de latência de $430\text{ ms}$ no cabo/Wi-Fi e HoL blocking no Trackpad/Ping. | `[x] Concluído` |
-| **FIX-02** | `docs/fixes/FIX-02-XTERM-PTY.md` | Lentidão extrema e crash fatal do app Android após carregar o Terminal Remoto. | `[x] Concluído` |
+| **FIX-02** | `docs/fixes/FIX-02-XTERM-PTY.md` (ou `fix-09.md`) | Lentidão extrema e crash fatal do app Android após carregar o Terminal Remoto. | `[x] Concluído` |
 | **FIX-03** | `docs/fixes/FIX-03-PERSISTENT-SCREEN.md` (ou `fix-08.md`) | Loop infinito no WebRTC e ausência de sinal de vida na Tela Remota com stream MJPEG contínuo. | `[x] Concluído` |

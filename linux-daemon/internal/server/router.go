@@ -20,6 +20,7 @@ type ClientSession interface {
 	CertFingerprint() string
 	Context() context.Context
 	Send(env *pb.Envelope) error
+	SendImmediate(env *pb.Envelope) error
 	Close() error
 }
 

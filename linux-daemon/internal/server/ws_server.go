@@ -69,12 +69,14 @@ type wsSession struct {
 	deviceName      string
 	certFingerprint string
 	conn            *websocket.Conn
-	sendCh          chan *pb.Envelope
+	ctrlCh          chan *pb.Envelope
+	bulkCh          chan *pb.Envelope
 	ctx             context.Context
 	cancel          context.CancelFunc
 	closeOnce       sync.Once
 	closed          atomic.Bool
 	writeTimeout    time.Duration
+	writeMu         sync.Mutex
 }
 
 func (s *wsSession) ID() string              { return s.id }
@@ -87,14 +89,56 @@ func (s *wsSession) Send(env *pb.Envelope) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
 	}
+	if env == nil {
+		return nil
+	}
+
+	if IsHighPriority(env) {
+		select {
+		case <-s.ctx.Done():
+			return ErrSessionClosed
+		case s.ctrlCh <- env:
+			return nil
+		default:
+			return ErrSendQueueFull
+		}
+	}
+
 	select {
 	case <-s.ctx.Done():
 		return ErrSessionClosed
-	case s.sendCh <- env:
+	case s.bulkCh <- env:
 		return nil
 	default:
 		return ErrSendQueueFull
 	}
+}
+
+func (s *wsSession) SendImmediate(env *pb.Envelope) error {
+	if s.closed.Load() {
+		return ErrSessionClosed
+	}
+	if env == nil {
+		return nil
+	}
+
+	raw, err := proto.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshal envelope: %w", err)
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if s.closed.Load() {
+		return ErrSessionClosed
+	}
+
+	_ = s.conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
+	if err := s.conn.WriteMessage(websocket.BinaryMessage, raw); err != nil {
+		return fmt.Errorf("write immediate binary message: %w", err)
+	}
+	return nil
 }
 
 func (s *wsSession) Close() error {
@@ -296,7 +340,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		deviceName:      trustedClient.DeviceName,
 		certFingerprint: clientFP,
 		conn:            conn,
-		sendCh:          make(chan *pb.Envelope, DefaultSendBufferSize),
+		ctrlCh:          make(chan *pb.Envelope, DefaultControlBufferSize),
+		bulkCh:          make(chan *pb.Envelope, DefaultBulkBufferSize),
 		ctx:             sessCtx,
 		cancel:          cancel,
 		writeTimeout:    DefaultWriteTimeout,
@@ -376,6 +421,29 @@ func (s *Server) readLoop(sess *wsSession) {
 			continue
 		}
 
+		// FIX-05: O Ping é respondido instantaneamente na camada de rede sem enfileiramento
+		if ping := env.GetPing(); ping != nil {
+			nowMs := time.Now().UnixMilli()
+			pongEnv := &pb.Envelope{
+				RequestId:   env.RequestId,
+				TimestampMs: nowMs,
+				Payload: &pb.Envelope_Pong{
+					Pong: &pb.Pong{
+						Seq:               ping.Seq,
+						ClientTimestampMs: ping.ClientTimestampMs,
+						ServerTimestampMs: nowMs,
+					},
+				},
+			}
+			if err := sess.SendImmediate(pongEnv); err != nil {
+				s.logger.Warn("failed to send immediate network-layer pong",
+					"session_id", sess.id,
+					"err", err,
+				)
+			}
+			continue
+		}
+
 		_ = s.router.Dispatch(sess.ctx, sess, &env)
 	}
 }
@@ -385,14 +453,51 @@ func (s *Server) writeLoop(sess *wsSession) {
 	defer ticker.Stop()
 
 	for {
+		// Strict priority drain: flush all high-priority control envelopes before processing bulk data
+		select {
+		case <-sess.ctx.Done():
+			return
+		case env, ok := <-sess.ctrlCh:
+			if !ok || env == nil {
+				return
+			}
+			if err := s.writeEnvelope(sess, env); err != nil {
+				_ = sess.Close()
+				return
+			}
+			continue
+		default:
+		}
+
 		select {
 		case <-sess.ctx.Done():
 			return
 
-		case env, ok := <-sess.sendCh:
+		case env, ok := <-sess.ctrlCh:
 			if !ok || env == nil {
 				return
 			}
+			if err := s.writeEnvelope(sess, env); err != nil {
+				_ = sess.Close()
+				return
+			}
+
+		case env, ok := <-sess.bulkCh:
+			if !ok || env == nil {
+				return
+			}
+			// Pre-check before sending heavy data: if high-priority control arrived, bypass and write it first
+			select {
+			case ctrlEnv, ok := <-sess.ctrlCh:
+				if ok && ctrlEnv != nil {
+					if err := s.writeEnvelope(sess, ctrlEnv); err != nil {
+						_ = sess.Close()
+						return
+					}
+				}
+			default:
+			}
+
 			if err := s.writeEnvelope(sess, env); err != nil {
 				_ = sess.Close()
 				return
@@ -415,8 +520,11 @@ func (s *Server) writeLoop(sess *wsSession) {
 				_ = sess.Close()
 				return
 			}
+			sess.writeMu.Lock()
 			_ = sess.conn.SetWriteDeadline(time.Now().Add(sess.writeTimeout))
-			if err := sess.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			err := sess.conn.WriteMessage(websocket.PingMessage, nil)
+			sess.writeMu.Unlock()
+			if err != nil {
 				_ = sess.Close()
 				return
 			}
@@ -429,6 +537,14 @@ func (s *Server) writeEnvelope(sess *wsSession, env *pb.Envelope) error {
 	if err != nil {
 		return fmt.Errorf("marshal envelope: %w", err)
 	}
+
+	sess.writeMu.Lock()
+	defer sess.writeMu.Unlock()
+
+	if sess.closed.Load() {
+		return ErrSessionClosed
+	}
+
 	_ = sess.conn.SetWriteDeadline(time.Now().Add(sess.writeTimeout))
 	if err := sess.conn.WriteMessage(websocket.BinaryMessage, raw); err != nil {
 		return fmt.Errorf("write binary message: %w", err)

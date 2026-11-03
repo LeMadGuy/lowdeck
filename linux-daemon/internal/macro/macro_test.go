@@ -37,6 +37,10 @@ func (m *mockClientSession) CertFingerprint() string    { return "abcd" }
 func (m *mockClientSession) Context() context.Context   { return m.ctx }
 func (m *mockClientSession) Close() error               { m.cancel(); return nil }
 
+func (m *mockClientSession) SendImmediate(env *pb.Envelope) error {
+	return m.Send(env)
+}
+
 func (m *mockClientSession) Send(env *pb.Envelope) error {
 	m.mu.Lock()
 	m.sent = append(m.sent, env)

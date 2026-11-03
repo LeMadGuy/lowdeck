@@ -35,6 +35,10 @@ func (c *testPtyClient) CertFingerprint() string  { return "1234" }
 func (c *testPtyClient) Context() context.Context { return c.ctx }
 func (c *testPtyClient) Close() error             { c.cancel(); return nil }
 
+func (c *testPtyClient) SendImmediate(env *pb.Envelope) error {
+	return c.Send(env)
+}
+
 func (c *testPtyClient) Send(env *pb.Envelope) error {
 	select {
 	case c.sendCh <- env:

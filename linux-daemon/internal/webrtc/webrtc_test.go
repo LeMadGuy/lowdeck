@@ -50,6 +50,10 @@ func (m *memoryClientSession) Send(env *pb.Envelope) error {
 		return nil
 	}
 }
+func (m *memoryClientSession) SendImmediate(env *pb.Envelope) error {
+	return m.Send(env)
+}
+
 func (m *memoryClientSession) Close() error {
 	m.closed.Store(true)
 	m.cancel()

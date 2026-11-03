@@ -210,10 +210,11 @@ func (s *Server) Start(ctx context.Context) (net.Addr, error) {
 		return nil, fmt.Errorf("server build tls config: %w", err)
 	}
 
-	ln, err := tls.Listen("tcp", s.cfg.ListenAddr, tlsCfg)
+	tcpLn, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("server listen %s: %w", s.cfg.ListenAddr, err)
 	}
+	ln := tls.NewListener(&lowLatencyListener{Listener: tcpLn}, tlsCfg)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
@@ -439,5 +440,39 @@ func newSessionID() string {
 	b := make([]byte, 12)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// TCPKeepAlivePeriod detects dead USB (adb reverse) / Wi-Fi peers quickly without application traffic.
+const TCPKeepAlivePeriod = 15 * time.Second
+
+// lowLatencyListener forces TCP_NODELAY (disables Nagle's algorithm) and aggressive TCP keep-alive on
+// every accepted connection so small, high-frequency input frames (MouseMoveEvent ~120 Hz) are flushed
+// to the wire immediately instead of being delayed up to 40 ms by Nagle + delayed-ACK interaction.
+type lowLatencyListener struct {
+	net.Listener
+}
+
+func (l *lowLatencyListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	ConfigureLowLatencyConn(conn)
+	return conn, nil
+}
+
+// ConfigureLowLatencyConn enables TCP_NODELAY and keep-alive on TCP connections (no-op otherwise).
+func ConfigureLowLatencyConn(conn net.Conn) {
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	_ = tcpConn.SetNoDelay(true)
+	_ = tcpConn.SetKeepAliveConfig(net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     TCPKeepAlivePeriod,
+		Interval: 5 * time.Second,
+		Count:    3,
+	})
 }
 

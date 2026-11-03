@@ -1,5 +1,8 @@
 #!/usr/bin/env sh
 # Gradle Wrapper bootstrap script for LinuxDeck Android Client.
+# Automatically selects a compatible LTS JDK (17..23) when the host default Java
+# is a bleeding-edge rolling release (e.g. OpenJDK 27 on Arch/CachyOS), which
+# otherwise crashes Gradle 8.x / Kotlin with ArrayIndexOutOfBoundsException ("27").
 set -e
 
 APP_HOME="$(cd "$(dirname "$0")" && pwd)"
@@ -18,13 +21,92 @@ if [ ! -f "$WRAPPER_JAR" ]; then
     fi
 fi
 
-JAVACMD="${JAVA_HOME:+$JAVA_HOME/bin/}java"
-if [ -z "$JAVA_HOME" ]; then
-    JAVACMD="java"
+java_major_version() {
+    _java_bin="$1"
+    if [ ! -x "$_java_bin" ]; then
+        return 1
+    fi
+    "$_java_bin" -version 2>&1 | awk -F '"' '/version/ {
+        split($2, parts, ".");
+        if (parts[1] == "1") print parts[2];
+        else print parts[1];
+        exit
+    }'
+}
+
+is_supported_jdk() {
+    _candidate="$1"
+    if [ -z "$_candidate" ] || [ ! -x "$_candidate/bin/java" ] || [ ! -x "$_candidate/bin/javac" ]; then
+        return 1
+    fi
+    _ver="$(java_major_version "$_candidate/bin/java" || true)"
+    case "$_ver" in
+        17|18|19|20|21|22|23) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+resolve_compatible_java_home() {
+    if [ -n "$JAVA_HOME" ] && is_supported_jdk "$JAVA_HOME"; then
+        printf '%s\n' "$JAVA_HOME"
+        return 0
+    fi
+
+    if command -v mise >/dev/null 2>&1; then
+        for _spec in "java@temurin-21" "java@21" "java@temurin-17" "java@17"; do
+            _mise_dir="$(mise where "$_spec" 2>/dev/null || true)"
+            if [ -n "$_mise_dir" ] && is_supported_jdk "$_mise_dir"; then
+                printf '%s\n' "$_mise_dir"
+                return 0
+            fi
+        done
+    fi
+
+    for _dir in \
+        "$HOME"/.local/share/mise/installs/java/temurin-21* \
+        "$HOME"/.local/share/mise/installs/java/21* \
+        "$HOME"/.local/share/mise/installs/java/temurin-17* \
+        "$HOME"/.local/share/mise/installs/java/17* \
+        /usr/lib/jvm/java-21-openjdk* \
+        /usr/lib/jvm/java-17-openjdk* \
+        /usr/lib/jvm/temurin-21* \
+        /usr/lib/jvm/temurin-17* \
+        "$HOME"/.jdks/*21* \
+        "$HOME"/.jdks/*17* \
+        "$HOME"/.sdkman/candidates/java/*21* \
+        "$HOME"/.sdkman/candidates/java/*17*
+    do
+        if [ -d "$_dir" ] && is_supported_jdk "$_dir"; then
+            printf '%s\n' "$_dir"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+if RESOLVED_JAVA_HOME="$(resolve_compatible_java_home)"; then
+    export JAVA_HOME="$RESOLVED_JAVA_HOME"
+    export PATH="$JAVA_HOME/bin:$PATH"
+    JAVACMD="$JAVA_HOME/bin/java"
+else
+    JAVACMD="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+    if [ -z "$JAVA_HOME" ]; then
+        JAVACMD="$(command -v java || true)"
+    fi
+    _active_ver="$(java_major_version "$JAVACMD" || true)"
+    echo "Error: Compatible JDK (17 or 21 LTS) not found. Active Java major version is '${_active_ver:-unknown}'." >&2
+    echo "Android Gradle Plugin 8.7.x / Gradle 8.10.2 does not support JDK 25+/27." >&2
+    echo "Install JDK 21 via: mise install java@temurin-21   OR   sudo pacman -S jdk21-openjdk" >&2
+    exit 1
+fi
+
+if [ -z "$ANDROID_HOME" ] && [ -z "$ANDROID_SDK_ROOT" ] && [ -d "$HOME/Android/Sdk" ]; then
+    export ANDROID_HOME="$HOME/Android/Sdk"
 fi
 
 exec "$JAVACMD" -Xmx64m -Xms64m \
     -Dorg.gradle.appname="gradlew" \
+    "-Dorg.gradle.java.home=$JAVA_HOME" \
     -classpath "$WRAPPER_JAR" \
     org.gradle.wrapper.GradleWrapperMain "$@"
-

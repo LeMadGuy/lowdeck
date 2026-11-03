@@ -116,14 +116,26 @@ func (s *TrustedStore) RemoveByFingerprint(fingerprint string) error {
 }
 
 // IsTrusted checks if a certificate SHA-256 fingerprint is registered in the store.
+// If not found in memory, reloads trusted_clients.json from disk once so clients paired via a
+// separate `deck-daemon --pair` process are accepted immediately without restarting the daemon.
 func (s *TrustedStore) IsTrusted(fingerprint string) bool {
 	fp := NormalizeFingerprint(fingerprint)
 	if fp == "" {
 		return false
 	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	_, ok := s.clients[fp]
+	s.mu.RUnlock()
+	if ok {
+		return true
+	}
+
+	if fileExists(s.filePath) {
+		_ = s.load()
+		s.mu.RLock()
+		_, ok = s.clients[fp]
+		s.mu.RUnlock()
+	}
 	return ok
 }
 
@@ -131,8 +143,17 @@ func (s *TrustedStore) IsTrusted(fingerprint string) bool {
 func (s *TrustedStore) GetByFingerprint(fingerprint string) (TrustedClient, bool) {
 	fp := NormalizeFingerprint(fingerprint)
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	c, ok := s.clients[fp]
+	s.mu.RUnlock()
+	if ok {
+		return c, true
+	}
+	if fileExists(s.filePath) {
+		_ = s.load()
+		s.mu.RLock()
+		c, ok = s.clients[fp]
+		s.mu.RUnlock()
+	}
 	return c, ok
 }
 

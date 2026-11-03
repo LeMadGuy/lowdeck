@@ -1,4 +1,5 @@
 import com.google.protobuf.gradle.id
+import com.google.protobuf.gradle.proto
 
 plugins {
     id("com.android.application")

@@ -177,4 +177,4 @@ Os agentes devem atualizar o status abaixo ao finalizar e validar cada etapa:
 | **TASK-10** | Android: UI do Macro Deck Dinâmico e Widgets de Telemetria | `TASK-05`, `TASK-06`, `TASK-09` | `[x] Concluída` |
 | **TASK-11** | Android: Trackpad Virtual Multi-gesto e Barra de Modificadores | `TASK-04`, `TASK-09` | `[x] Concluída` |
 | **TASK-12** | Android: Desktop Remoto WebRTC e Mapeamento de Toque | `TASK-04`, `TASK-08`, `TASK-09`, `TASK-11` | `[x] Concluída` |
-| **TASK-13** | Android: Emulador de Terminal Integrado (PTY) e Polimento Final | `TASK-05`, `TASK-09` a `TASK-12` | `[ ] Pendente` |
+| **TASK-13** | Android: Emulador de Terminal Integrado (PTY) e Polimento Final | `TASK-05`, `TASK-09` a `TASK-12` | `[x] Concluída` |

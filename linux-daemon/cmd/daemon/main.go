@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -54,7 +55,13 @@ func main() {
 
 	pairingMgr := auth.NewPairingManager(serverIdentity, trustedStore)
 
-	if *pairFlag {
+	enablePairing := *pairFlag
+	if !enablePairing && len(trustedStore.ListClients()) == 0 {
+		logger.Info("no trusted clients registered yet; enabling initial 5-minute pairing mode automatically")
+		enablePairing = true
+	}
+
+	if enablePairing {
 		payload, err := pairingMgr.GenerateSession(*host, *port, *pairingPort)
 		if err != nil {
 			logger.Error("failed to generate pairing session", "err", err)
@@ -73,6 +80,8 @@ func main() {
 		fmt.Printf("Pairing Token: %s\n", payload.Token)
 		fmt.Printf("Server SHA256: %s\n", payload.ServerFP)
 		fmt.Printf("Expires At:    %s\n", time.Unix(payload.ExpiresAt, 0).Format(time.RFC3339))
+		fmt.Printf("USB (ADB):     adb reverse tcp:%d tcp:%d && adb reverse tcp:%d tcp:%d\n", *port, *port, *pairingPort, *pairingPort)
+		fmt.Printf("Wi-Fi (UFW):   sudo ufw allow %d,%d/tcp\n", *port, *pairingPort)
 		fmt.Println("================================================================")
 
 		if *printOnly {
@@ -89,7 +98,8 @@ func main() {
 	}
 
 	router := server.NewRouter(logger)
-	inputInjector := input.NewInputInjector(logger)
+	// Asynchronous bounded/coalescing queue: the WebSocket read loop never blocks on /dev/uinput writes.
+	inputInjector := input.NewAsyncInjector(input.NewInputInjector(logger), input.DefaultAsyncQueueCapacity, logger)
 	defer func() {
 		_ = inputInjector.Close()
 	}()
@@ -145,6 +155,18 @@ func main() {
 
 	listenAddr, err := wsSrv.Start(ctx)
 	if err != nil {
+		if enablePairing && strings.Contains(strings.ToLower(err.Error()), "address already in use") {
+			logger.Info("control port already served by active deck-daemon; keeping pairing server open for 5 minutes",
+				"control_port", *port,
+				"pairing_port", *pairingPort,
+			)
+			select {
+			case <-ctx.Done():
+			case <-time.After(auth.PairingTokenTTL):
+				logger.Info("pairing window expired; exiting helper pairing process")
+			}
+			return
+		}
 		logger.Error("failed to start mTLS WebSocket server", "err", err)
 		os.Exit(1)
 	}

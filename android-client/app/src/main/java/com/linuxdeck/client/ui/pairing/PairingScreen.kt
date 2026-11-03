@@ -97,6 +97,7 @@ import com.linuxdeck.client.network.DiscoveredHost
 import com.linuxdeck.client.network.MdnsDiscoveryManager
 import com.linuxdeck.client.security.PairedHostConfig
 import com.linuxdeck.client.security.PairingQrPayload
+import com.linuxdeck.client.ui.navigation.LinuxDeckApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -120,6 +121,7 @@ data class PairingUiState(
     val isDiscovering: Boolean = false,
     val discoveryError: String? = null,
     val hostInput: String = "127.0.0.1",
+    val hostManuallySelected: Boolean = false,
     val controlPortInput: String = PairingQrPayload.DEFAULT_CONTROL_PORT.toString(),
     val pairingPortInput: String = PairingQrPayload.DEFAULT_PAIRING_PORT.toString(),
     val serverFpInput: String = "",
@@ -182,7 +184,7 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
                         discoveryError = mdnsErr,
                         pairedHost = paired,
                         connectionState = connState,
-                        hostInput = if (current.hostInput == "127.0.0.1" && paired != null) {
+                        hostInput = if (!current.hostManuallySelected && current.hostInput == "127.0.0.1" && paired != null) {
                             paired.host
                         } else {
                             current.hostInput
@@ -194,7 +196,13 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onHostChanged(value: String) {
-        _uiState.update { it.copy(hostInput = value, errorMessage = null) }
+        _uiState.update {
+            it.copy(
+                hostInput = value,
+                hostManuallySelected = value.isNotBlank(),
+                errorMessage = null,
+            )
+        }
     }
 
     fun onControlPortChanged(value: String) {
@@ -214,9 +222,13 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
         val trimmed = value.trim()
         if (trimmed.startsWith("{")) {
             runCatching { PairingQrPayload.parse(trimmed) }.onSuccess { parsed ->
-                _uiState.update {
-                    it.copy(
-                        hostInput = parsed.host,
+                _uiState.update { current ->
+                    current.copy(
+                        hostInput = if (current.hostManuallySelected && current.hostInput.isNotBlank()) {
+                            current.hostInput.trim()
+                        } else {
+                            parsed.host
+                        },
                         controlPortInput = parsed.port.toString(),
                         pairingPortInput = parsed.pairingPort.toString(),
                         serverFpInput = parsed.serverFp,
@@ -240,6 +252,7 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
         _uiState.update {
             it.copy(
                 hostInput = host.hostAddress,
+                hostManuallySelected = true,
                 controlPortInput = host.port.toString(),
                 pairingPortInput = host.pairingPort.toString(),
                 errorMessage = null,
@@ -276,12 +289,18 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
                 ?: PairingQrPayload.DEFAULT_PAIRING_PORT
 
             val payload = try {
-                PairingQrPayload.parse(
+                val parsed = PairingQrPayload.parse(
                     rawInput = snapshot.qrOrTokenInput,
                     fallbackHost = snapshot.hostInput,
                     fallbackPort = controlPort,
                     fallbackPairingPort = pairingPort,
                     fallbackServerFp = snapshot.serverFpInput,
+                )
+                val targetHost = snapshot.hostInput.trim().ifEmpty { parsed.host }
+                parsed.copy(
+                    host = targetHost,
+                    port = controlPort,
+                    pairingPort = pairingPort,
                 )
             } catch (e: IllegalArgumentException) {
                 _uiState.update { it.copy(errorMessage = e.message ?: "Dados de pareamento inválidos.") }
@@ -407,20 +426,13 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
 }
 
 /**
- * Main entry activity hosting [PairingRoute] (and ready to integrate with `MainScaffold` in TASK-13).
+ * Main entry activity hosting [LinuxDeckApp] (`MainScaffold` + [PairingRoute]).
  */
 class PairingActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background,
-                ) {
-                    PairingRoute()
-                }
-            }
+            LinuxDeckApp()
         }
     }
 }

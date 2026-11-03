@@ -1,6 +1,7 @@
 package com.linuxdeck.client.ui.trackpad
 
 import android.os.SystemClock
+import android.view.Choreographer
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
@@ -201,9 +202,15 @@ sealed interface TrackpadAction {
 /**
  * Coalesces high-frequency digitizer touch deltas (240Hz–480Hz) to the display refresh cadence
  * (60Hz = 16ms or 120Hz = 8ms) so the WebSocket outbound channel is never saturated.
+ *
+ * When [vsyncDriven] is `true`, motion/scroll deltas are only accumulated by [recordOrFlush] and are
+ * emitted exclusively by [flushPending] from a `Choreographer` frame callback
+ * ([ChoreographerMotionFlusher]), producing exactly one packet per display frame in perfect phase with
+ * the screen refresh — no bursts, no trailing deltas stuck until the next touch sample.
  */
 class MotionCoalescer(
     frameIntervalMs: Long = 8L,
+    val vsyncDriven: Boolean = false,
 ) {
     var frameIntervalMs: Long = frameIntervalMs.coerceIn(4L, 33L)
 
@@ -225,7 +232,7 @@ class MotionCoalescer(
                 is TrackpadAction.MoveRelative -> {
                     pendingMoveDx += action.dx
                     pendingMoveDy += action.dy
-                    if (nowMs - lastMoveEmitMs >= frameIntervalMs && (pendingMoveDx != 0 || pendingMoveDy != 0)) {
+                    if (!vsyncDriven && nowMs - lastMoveEmitMs >= frameIntervalMs && (pendingMoveDx != 0 || pendingMoveDy != 0)) {
                         out.add(TrackpadAction.MoveRelative(pendingMoveDx, pendingMoveDy))
                         pendingMoveDx = 0
                         pendingMoveDy = 0
@@ -236,7 +243,7 @@ class MotionCoalescer(
                 is TrackpadAction.Scroll -> {
                     pendingScrollDx += action.dx
                     pendingScrollDy += action.dy
-                    if (nowMs - lastScrollEmitMs >= frameIntervalMs && (pendingScrollDx != 0 || pendingScrollDy != 0)) {
+                    if (!vsyncDriven && nowMs - lastScrollEmitMs >= frameIntervalMs && (pendingScrollDx != 0 || pendingScrollDy != 0)) {
                         out.add(TrackpadAction.Scroll(pendingScrollDx, pendingScrollDy))
                         pendingScrollDx = 0
                         pendingScrollDy = 0
@@ -279,11 +286,68 @@ class MotionCoalescer(
         }
     }
 
+    @Synchronized
+    fun hasPending(): Boolean =
+        pendingMoveDx != 0 || pendingMoveDy != 0 || pendingScrollDx != 0 || pendingScrollDy != 0
+
     companion object {
         fun frameIntervalForRefreshRate(refreshRateHz: Float): Long = when {
             refreshRateHz >= 100f -> 8L // ~120Hz
             refreshRateHz >= 80f -> 11L // ~90Hz
             else -> 16L // ~60Hz
+        }
+    }
+}
+
+/**
+ * Display-synchronized (VSYNC) flusher for [MotionCoalescer] built on [Choreographer].
+ *
+ * While a gesture is active it re-posts itself on every frame callback (60/90/120 Hz, matching the
+ * panel's current refresh rate) and emits at most one coalesced `MoveRelative` + one `Scroll` per frame.
+ * It stops automatically once the fingers are lifted and no delta remains, so no CPU is burned at idle.
+ *
+ * Must be started/stopped from the main (Looper) thread, where Compose pointer input also runs.
+ */
+class ChoreographerMotionFlusher(
+    private val coalescer: MotionCoalescer,
+    private val emit: (TrackpadAction) -> Unit,
+    private val choreographer: Choreographer = Choreographer.getInstance(),
+) : Choreographer.FrameCallback {
+
+    private var running = false
+    private var keepAlive = false
+
+    val isRunning: Boolean get() = running
+
+    /** Starts per-frame flushing (idempotent). [gestureActive] keeps the loop alive while touching. */
+    fun start(gestureActive: Boolean = true) {
+        keepAlive = gestureActive
+        if (running) return
+        running = true
+        choreographer.postFrameCallback(this)
+    }
+
+    /** Lets the loop finish after flushing any remaining delta on the next frame. */
+    fun release() {
+        keepAlive = false
+    }
+
+    /** Immediately cancels the frame loop (e.g. when leaving composition). */
+    fun stop() {
+        keepAlive = false
+        if (!running) return
+        running = false
+        choreographer.removeFrameCallback(this)
+    }
+
+    override fun doFrame(frameTimeNanos: Long) {
+        if (!running) return
+        val nowMs = SystemClock.uptimeMillis()
+        coalescer.flushPending(nowMs).forEach(emit)
+        if (keepAlive || coalescer.hasPending()) {
+            choreographer.postFrameCallback(this)
+        } else {
+            running = false
         }
     }
 }
@@ -687,7 +751,14 @@ fun GestureDetectorSurface(
 
     val machine = remember { TrackpadGestureMachine(config) }
     val coalescer = remember(refreshRateHz) {
-        MotionCoalescer(MotionCoalescer.frameIntervalForRefreshRate(refreshRateHz))
+        MotionCoalescer(
+            frameIntervalMs = MotionCoalescer.frameIntervalForRefreshRate(refreshRateHz),
+            vsyncDriven = true,
+        )
+    }
+
+    val choreographerFlusher = remember(coalescer) {
+        ChoreographerMotionFlusher(coalescer, emit = { currentOnAction(it) })
     }
 
     LaunchedEffect(config) {
@@ -712,6 +783,9 @@ fun GestureDetectorSurface(
         for (act in coalesced) {
             currentOnAction(act)
         }
+        if (coalescer.hasPending()) {
+            choreographerFlusher.start(gestureActive = true)
+        }
     }
 
     // Drive gesture timeout transitions (single-tap confirmation & stationary drag-hold lock)
@@ -735,8 +809,9 @@ fun GestureDetectorSurface(
     }
 
     // Safety release if the composable leaves composition mid-drag.
-    DisposableEffect(Unit) {
+    DisposableEffect(choreographerFlusher) {
         onDispose {
+            choreographerFlusher.stop()
             val nowUptimeMs = SystemClock.uptimeMillis()
             coalescer.flushPending(nowUptimeMs).forEach { currentOnAction(it) }
             machine.cancel().forEach { currentOnAction(it) }
@@ -771,6 +846,7 @@ fun GestureDetectorSurface(
                     dispatchActions(rawActions, nowUptimeMs)
 
                     if (pressedPointers.isEmpty()) {
+                        choreographerFlusher.release()
                         val remaining = coalescer.flushPending(nowUptimeMs)
                         remaining.forEach { currentOnAction(it) }
                     }

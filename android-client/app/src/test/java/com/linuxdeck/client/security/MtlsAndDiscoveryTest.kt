@@ -23,7 +23,7 @@ class MtlsAndDiscoveryTest {
               "host": "192.168.15.42",
               "port": 8443,
               "pairing_port": 8444,
-              "server_fp": "SHA256:AA:BB:ef0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+              "server_fp": "SHA256:AA:BB:ef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
               "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
               "expires_at": 1893456000
             }

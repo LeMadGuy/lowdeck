@@ -41,6 +41,7 @@ type ptySession struct {
 	client    server.ClientSession
 	cmd       *exec.Cmd
 	ptmx      *os.File
+	fd        int
 	closeOnce sync.Once
 	doneCh    chan struct{}
 	mu        sync.Mutex
@@ -159,12 +160,20 @@ func (m *Manager) HandleOpen(ctx context.Context, client server.ClientSession, e
 		return fmt.Errorf("pty start %s: %w", shell, err)
 	}
 
+	// Set master PTY to non-blocking mode (O_NONBLOCK) so readLoop and writes
+	// never block indefinitely or freeze goroutines on congested I/O.
+	ptmxFd := int(ptmx.Fd())
+	if err := syscall.SetNonblock(ptmxFd, true); err != nil {
+		m.logger.Warn("failed to set ptmx non-blocking", "err", err)
+	}
+
 	sess := &ptySession{
 		sessionID: sessionID,
 		clientID:  clientID,
 		client:    client,
 		cmd:       cmd,
 		ptmx:      ptmx,
+		fd:        ptmxFd,
 		doneCh:    make(chan struct{}),
 		rows:      rows,
 		cols:      cols,
@@ -355,29 +364,102 @@ func (m *Manager) getSession(sessionID string) (*ptySession, bool) {
 }
 
 func (m *Manager) readLoop(sess *ptySession) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := sess.ptmx.Read(buf)
-		if n > 0 && sess.client != nil {
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
-			_ = sess.client.Send(&pb.Envelope{
-				RequestId:   fmt.Sprintf("pty-data-%d", time.Now().UnixNano()),
-				TimestampMs: time.Now().UnixMilli(),
-				Payload: &pb.Envelope_PtyDataEvent{
-					PtyDataEvent: &pb.PtyDataEvent{
-						SessionId: sess.sessionID,
-						Data:      chunk,
-					},
-				},
-			})
+	buf := make([]byte, 8192)
+	pending := make([]byte, 0, 16384)
+	flushTimer := time.NewTimer(time.Hour)
+	flushTimer.Stop()
+	flushTimerActive := false
+
+	flush := func() {
+		if len(pending) == 0 || sess.client == nil {
+			return
 		}
+		chunk := make([]byte, len(pending))
+		copy(chunk, pending)
+		pending = pending[:0]
+		_ = sess.client.Send(&pb.Envelope{
+			RequestId:   fmt.Sprintf("pty-data-%d", time.Now().UnixNano()),
+			TimestampMs: time.Now().UnixMilli(),
+			Payload: &pb.Envelope_PtyDataEvent{
+				PtyDataEvent: &pb.PtyDataEvent{
+					SessionId: sess.sessionID,
+					Data:      chunk,
+				},
+			},
+		})
+	}
+
+	defer func() {
+		flushTimer.Stop()
+		flush()
+		_ = m.CloseSession(sess.sessionID, "process exited")
+	}()
+
+	fd := sess.fd
+	for {
+		// Non-blocking read directly via syscall
+		n, err := syscall.Read(fd, buf)
+		if n > 0 {
+			pending = append(pending, buf[:n]...)
+
+			// If buffer has grown large (>= 4KB), flush immediately without waiting for timer
+			if len(pending) >= 4096 {
+				if flushTimerActive {
+					flushTimer.Stop()
+					flushTimerActive = false
+				}
+				flush()
+			} else if !flushTimerActive {
+				// Coalesce small fragmented byte bursts with a short 8ms-12ms window
+				flushTimer.Reset(10 * time.Millisecond)
+				flushTimerActive = true
+			}
+			continue
+		}
+
 		if err != nil {
+			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+				// Check if the timer fired while waiting
+				if flushTimerActive {
+					select {
+					case <-flushTimer.C:
+						flushTimerActive = false
+						flush()
+					default:
+					}
+				}
+
+				// Check if session has been closed
+				select {
+				case <-sess.doneCh:
+					return
+				default:
+				}
+
+				// Wait for data readiness using syscall.Select with a brief timeout (8ms or 4ms)
+				timeoutUsec := int64(8000)
+				if flushTimerActive {
+					timeoutUsec = 4000
+				}
+				tv := syscall.NsecToTimeval(timeoutUsec * 1000)
+				var rset syscall.FdSet
+				// Bits in FdSet
+				rset.Bits[fd/64] |= 1 << (uint(fd) % 64)
+				_, selErr := syscall.Select(fd+1, &rset, nil, nil, &tv)
+				if selErr != nil && !errors.Is(selErr, syscall.EINTR) {
+					break
+				}
+				continue
+			}
+			// EOF (EIO on Linux PTY slave close) or fatal read error
+			break
+		}
+
+		if n == 0 {
+			// Zero bytes read from PTY indicates EOF
 			break
 		}
 	}
-
-	_ = m.CloseSession(sess.sessionID, "process exited")
 }
 
 func (m *Manager) closeSession(sess *ptySession, reason string) error {

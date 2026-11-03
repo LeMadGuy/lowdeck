@@ -20,7 +20,7 @@
         android:label="Linux Deck"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar"
-        android:usesCleartextTraffic="false">
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".ui.pairing.PairingActivity"

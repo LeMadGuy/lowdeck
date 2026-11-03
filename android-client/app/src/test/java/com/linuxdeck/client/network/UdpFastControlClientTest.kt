@@ -7,7 +7,6 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Before
 import org.junit.Test
 import java.net.DatagramPacket
@@ -35,6 +34,39 @@ class UdpFastControlClientTest {
         try {
             serverSocket?.close()
         } catch (_: Exception) {}
+    }
+
+    @Test
+    fun testSendMouseRelativeDatagram() {
+        val client = UdpFastControlClient(
+            host = "127.0.0.1",
+            port = serverPort,
+            sessionClient = null,
+            scope = testScope,
+        )
+
+        try {
+            client.sendMouseRelative(-42, 108)
+
+            var packet: DatagramPacket
+            val buf = ByteArray(32)
+            do {
+                packet = DatagramPacket(buf, buf.size)
+                serverSocket?.receive(packet)
+            } while (buf[0] == 0x01.toByte()) // Skip background OP_PING
+
+            assertEquals(5, packet.length)
+            assertEquals(0x10.toByte(), buf[0]) // OP_MOUSE_REL
+
+            val bb = ByteBuffer.wrap(buf, 1, 4).order(ByteOrder.BIG_ENDIAN)
+            val dx = bb.short.toInt()
+            val dy = bb.short.toInt()
+
+            assertEquals(-42, dx)
+            assertEquals(108, dy)
+        } finally {
+            client.close()
+        }
     }
 
     @Test
@@ -96,6 +128,39 @@ class UdpFastControlClientTest {
             assertEquals(0x12.toByte(), buf[0]) // OP_MOUSE_BTN
             assertEquals(1.toByte(), buf[1])    // BTN_LEFT
             assertEquals(1.toByte(), buf[2])    // PRESS
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun testSendMouseScrollDatagram() {
+        val client = UdpFastControlClient(
+            host = "127.0.0.1",
+            port = serverPort,
+            sessionClient = null,
+            scope = testScope,
+        )
+
+        try {
+            client.sendMouseScroll(vScroll = -15, hScroll = 20)
+
+            var packet: DatagramPacket
+            val buf = ByteArray(32)
+            do {
+                packet = DatagramPacket(buf, buf.size)
+                serverSocket?.receive(packet)
+            } while (buf[0] == 0x01.toByte()) // Skip background OP_PING
+
+            assertEquals(5, packet.length)
+            assertEquals(0x13.toByte(), buf[0]) // OP_MOUSE_SCROLL
+
+            val bb = ByteBuffer.wrap(buf, 1, 4).order(ByteOrder.BIG_ENDIAN)
+            val vScroll = bb.short.toInt()
+            val hScroll = bb.short.toInt()
+
+            assertEquals(-15, vScroll)
+            assertEquals(20, hScroll)
         } finally {
             client.close()
         }

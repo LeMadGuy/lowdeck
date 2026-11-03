@@ -70,11 +70,13 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.linuxdeck.client.network.ConnectionState
 import com.linuxdeck.client.network.DeckConnectionService
 import com.linuxdeck.client.network.DeckSessionClient
+import com.linuxdeck.client.network.UdpFastControlClient
 import com.linuxdeck.client.protocol.v1.ButtonAction
 import com.linuxdeck.client.protocol.v1.Envelope
 import com.linuxdeck.client.protocol.v1.KeyComboEvent
 import com.linuxdeck.client.protocol.v1.MouseButton
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -117,20 +119,42 @@ data class TrackpadUiState(
 class TrackpadViewModel(
     private val sink: TrackpadEventSink,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val udpClient: UdpFastControlClient? = null,
 ) : ViewModel() {
 
     val connectionState: StateFlow<ConnectionState> = sink.connectionState
+    val udpRttMs: StateFlow<Long>? = udpClient?.rttMs
 
     private val _uiState = MutableStateFlow(TrackpadUiState())
     val uiState: StateFlow<TrackpadUiState> = _uiState.asStateFlow()
 
     fun onTrackpadAction(action: TrackpadAction) {
+        if (udpClient != null) {
+            when (action) {
+                is TrackpadAction.MoveRelative -> {
+                    udpClient.sendMouseRelative(action.dx, action.dy)
+                    return
+                }
+                is TrackpadAction.Scroll -> {
+                    udpClient.sendMouseScroll(vScroll = action.dy, hScroll = action.dx)
+                    return
+                }
+                is TrackpadAction.Button -> {
+                    udpClient.sendMouseButton(action.button, action.action)
+                    return
+                }
+            }
+        }
         viewModelScope.launch(ioDispatcher) {
             sink.sendAsync(action.toEnvelope())
         }
     }
 
     fun onMouseButtonAction(button: MouseButton, action: ButtonAction) {
+        if (udpClient != null) {
+            udpClient.sendMouseButton(button, action)
+            return
+        }
         viewModelScope.launch(ioDispatcher) {
             sink.sendAsync(TrackpadAction.Button(button, action).toEnvelope())
         }
@@ -271,6 +295,7 @@ class TrackpadViewModel(
 
     override fun onCleared() {
         clearStickyModifiers()
+        udpClient?.close()
         super.onCleared()
     }
 
@@ -281,9 +306,18 @@ class TrackpadViewModel(
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
                     val client = DeckConnectionService.obtainClient(appContext)
+                    val connState = client.connectionState.value
+                    val host = (connState as? ConnectionState.Connected)?.host ?: "127.0.0.1"
+                    val udp = UdpFastControlClient(
+                        host = host,
+                        port = 8443,
+                        sessionClient = client,
+                        scope = CoroutineScope(Dispatchers.IO),
+                    )
                     return TrackpadViewModel(
                         sink = SessionClientTrackpadSink(client),
                         ioDispatcher = Dispatchers.IO,
+                        udpClient = udp,
                     ) as T
                 }
             }

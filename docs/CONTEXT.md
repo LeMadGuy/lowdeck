@@ -205,14 +205,23 @@ A arquitetura v3 do **LowDeck** resolve esses três problemas na raiz dividindo 
 
 ## 2. Mapa de Portas e Canais do LowDeck v3
 
-1. **Porta `:8443/tcp` (Canal de Controle Seguro WebSocket/Protobuf):**
-   * Usado exclusivamente para: Pareamento/Auth, Sincronização de Botões do Macro Deck, Execução de Macros, Controle de Mídia (`wpctl`/MPRIS2) e Telemetria leve.
+1. **Porta `:8443/tcp` (Canal de Controle Seguro WebSocket/Protobuf mTLS 1.3):**
+   * Usado exclusivamente para: Sincronização de Botões do Macro Deck, Execução de Macros, Controle de Mídia (`wpctl`/MPRIS2) e Telemetria leve.
 2. **Porta `:8443/udp` (UDP Fast-Lane — Especificado no `FIX-01`):**
    * Usado exclusivamente para: Movimento relativo do Trackpad, Posicionamento absoluto de toque na Tela Remota, Cliques/Scroll de Mouse e Heartbeat/Ping de precisão em microssegundos.
 3. **Porta `:8444/tcp` (Servidor Local de Mídia Pesada e PTY — Especificado nos `FIX-02` e `FIX-03`):**
    * `GET /terminal`: Serve a interface HTML/Canvas enxuta com `xterm.js` e `xterm-addon-fit`.
    * `GET /ws/pty`: WebSocket binário puro ligado diretamente ao descritor `/dev/ptmx` (`creack/pty`).
    * `GET /screen.mjpg`: Stream HTTP `multipart/x-mixed-replace; boundary=frame` contínuo gerado por um único processo filho persistente enquanto o cliente estiver na aba de Tela Remota.
+   * *Aviso Android:* Requer `android:usesCleartextTraffic="true"` no `AndroidManifest.xml` pois opera via HTTP/WS plano em loopback/LAN.
+4. **Porta `:8445/tcp` (Servidor de Pareamento Automático e Troca de Chaves mTLS):**
+   * Usado para escanear o QR Code ou receber a chave de pareamento e instalar os certificados mTLS com segurança.
+
+### Conexão USB (ADB Reverse)
+Para conectar via cabo USB (loopback `127.0.0.1`), execute o script `./scripts/setup-usb.sh` ou manualmente:
+```bash
+adb reverse tcp:8443 tcp:8443 && adb reverse tcp:8444 tcp:8444 && adb reverse tcp:8445 tcp:8445
+```
 
 ---
 
@@ -235,6 +244,6 @@ Os agentes devem executar os arquivos de especificação abaixo em ordem e marca
 
 | ID | Arquivo de Especificação | Problema Resolvido | Status |
 | :--- | :--- | :--- | :--- |
-| **FIX-01** | `docs/fixes/FIX-01-UDP-FASTLANE.md` | Picos de latência de $430\text{ ms}$ no cabo/Wi-Fi e HoL blocking no Trackpad/Ping. | `[x] Concluído` |
+| **FIX-01** | `docs/fixes/FIX-01-UDP-FASTLANE.md` (ou `fix-10.md`) | Picos de latência de $430\text{ ms}$ no cabo/Wi-Fi e HoL blocking no Trackpad/Ping. | `[x] Concluído` |
 | **FIX-02** | `docs/fixes/FIX-02-XTERM-PTY.md` (ou `fix-09.md`) | Lentidão extrema e crash fatal do app Android após carregar o Terminal Remoto. | `[x] Concluído` |
 | **FIX-03** | `docs/fixes/FIX-03-PERSISTENT-SCREEN.md` (ou `fix-08.md`) | Loop infinito no WebRTC e ausência de sinal de vida na Tela Remota com stream MJPEG contínuo. | `[x] Concluído` |

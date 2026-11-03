@@ -82,7 +82,7 @@ func main() {
 		fmt.Printf("Pairing Token: %s\n", payload.Token)
 		fmt.Printf("Server SHA256: %s\n", payload.ServerFP)
 		fmt.Printf("Expires At:    %s\n", time.Unix(payload.ExpiresAt, 0).Format(time.RFC3339))
-		fmt.Printf("USB (ADB):     adb reverse tcp:%d tcp:%d && adb reverse tcp:%d tcp:%d\n", *port, *port, *pairingPort, *pairingPort)
+		fmt.Printf("USB (ADB):     adb reverse tcp:%d tcp:%d && adb reverse tcp:%d tcp:%d && adb reverse tcp:%d tcp:%d\n", *port, *port, *screenPort, *screenPort, *pairingPort, *pairingPort)
 		fmt.Printf("Wi-Fi (UFW):   sudo ufw allow %d,%d/tcp\n", *port, *pairingPort)
 		fmt.Println("================================================================")
 
@@ -184,6 +184,15 @@ func main() {
 		logger.Warn("failed to initialize mDNS advertiser", "err", err)
 	} else if err := mdnsAdv.Start(ctx); err != nil {
 		logger.Warn("failed to start mDNS advertiser", "err", err)
+	}
+
+	udpFastLane := server.NewUdpFastLaneServer(fmt.Sprintf("0.0.0.0:%d", *port), inputInjector, logger)
+	if _, err := udpFastLane.Start(ctx); err != nil {
+		logger.Warn("failed to start UDP fast-lane listener", "err", err, "port", *port)
+	} else {
+		defer func() {
+			_ = udpFastLane.Close()
+		}()
 	}
 
 	mjpegSrv := capture.NewMjpegServer(fmt.Sprintf("0.0.0.0:%d", *screenPort), logger)

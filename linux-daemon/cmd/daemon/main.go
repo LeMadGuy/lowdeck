@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/local/linux-deck-daemon/internal/auth"
+	"github.com/local/linux-deck-daemon/internal/capture"
 	"github.com/local/linux-deck-daemon/internal/dbus"
 	"github.com/local/linux-deck-daemon/internal/discovery"
 	"github.com/local/linux-deck-daemon/internal/input"
@@ -29,7 +30,8 @@ func main() {
 		configDir   = flag.String("config-dir", "", "Configuration directory (default: ~/.config/deck-daemon)")
 		host        = flag.String("host", "", "Advertised host/IP for QR code pairing")
 		port        = flag.Int("port", auth.DefaultControlPort, "mTLS WebSocket control server port")
-		pairingPort = flag.Int("pairing-port", auth.DefaultPairingPort, "Temporary TLS pairing server port")
+		pairingPort = flag.Int("pairing-port", 8445, "Temporary TLS pairing server port")
+		screenPort  = flag.Int("screen-port", capture.DefaultMjpegPort, "Continuous HTTP MJPEG screen stream port")
 		pairFlag    = flag.Bool("pair", false, "Generate and display a 5-minute pairing QR Code and token in the terminal")
 		printOnly   = flag.Bool("print-qr-only", false, "When combined with --pair, print QR code/token and exit immediately")
 	)
@@ -184,6 +186,14 @@ func main() {
 		logger.Warn("failed to start mDNS advertiser", "err", err)
 	}
 
+	mjpegSrv := capture.NewMjpegServer(fmt.Sprintf("0.0.0.0:%d", *screenPort), logger)
+	mjpegAddr, err := mjpegSrv.Start(ctx)
+	if err != nil {
+		logger.Warn("failed to start continuous mjpeg screen stream server", "err", err, "port", *screenPort)
+	} else {
+		logger.Info("continuous mjpeg screen stream ready", "addr", mjpegAddr.String(), "path", capture.DefaultMjpegPath)
+	}
+
 	logger.Info("daemon ready",
 		"control_addr", listenAddr.String(),
 		"server_fp", serverIdentity.Fingerprint[:16],
@@ -195,6 +205,9 @@ func main() {
 
 	if mdnsAdv != nil {
 		mdnsAdv.Shutdown()
+	}
+	if mjpegSrv != nil {
+		_ = mjpegSrv.Shutdown(context.Background())
 	}
 	webrtcSig.CloseAll()
 	ptyMgr.CloseAll()

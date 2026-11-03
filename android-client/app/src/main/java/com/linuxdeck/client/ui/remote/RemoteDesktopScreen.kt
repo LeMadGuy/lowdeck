@@ -1,10 +1,11 @@
 package com.linuxdeck.client.ui.remote
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.SystemClock
-import android.view.ViewGroup
-import android.widget.FrameLayout
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -27,14 +28,14 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.CenterFocusStrong
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.Mouse
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material.icons.rounded.VolumeOff
-import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -46,6 +47,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -59,10 +61,13 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -78,14 +83,12 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.linuxdeck.client.fixes.RemoteScreenViewer
-import com.linuxdeck.client.fixes.RemoteScreenViewerController
+import com.linuxdeck.client.network.ConnectionState
 import com.linuxdeck.client.network.DeckConnectionService
+import com.linuxdeck.client.network.UdpFastControlClient
 import com.linuxdeck.client.protocol.v1.ButtonAction
 import com.linuxdeck.client.protocol.v1.Envelope
-import com.linuxdeck.client.protocol.v1.KeyComboEvent
 import com.linuxdeck.client.protocol.v1.MouseButton
 import com.linuxdeck.client.protocol.v1.MouseButtonEvent
 import com.linuxdeck.client.protocol.v1.MouseMoveEvent
@@ -96,12 +99,17 @@ import com.linuxdeck.client.ui.trackpad.StickyModifierHelper
 import com.linuxdeck.client.ui.trackpad.TrackpadAccelerationConfig
 import com.linuxdeck.client.ui.trackpad.TrackpadAction
 import com.linuxdeck.client.webrtc.RemoteStreamConfig
-import com.linuxdeck.client.webrtc.StreamConnectionState
-import com.linuxdeck.client.webrtc.WebRtcClientManager
+import com.linuxdeck.client.webrtc.VideoResolution
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.webrtc.SurfaceViewRenderer
-import java.util.Locale
+import kotlinx.coroutines.withContext
+import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.UUID
 import kotlin.math.hypot
 
@@ -109,17 +117,7 @@ import kotlin.math.hypot
  * Selectable touch interaction modes for Remote Desktop (`TASK-12`).
  */
 enum class RemoteInteractionMode {
-    /**
-     * Direct Touch (Absolute): tapping/dragging a point on the monitor image maps `(norm_x, norm_y)`
-     * in `[0.0, 1.0]` discounting letterbox bars and zoom/pan, dispatching `MouseMoveEvent(is_absolute=true)`
-     * followed by mouse button actions.
-     */
     DIRECT_TOUCH,
-
-    /**
-     * Relative Cursor (Trackpad over Video): dragging anywhere moves the remote cursor relatively
-     * with velocity acceleration without needing to reach corners with the thumb.
-     */
     RELATIVE_CURSOR,
 }
 
@@ -133,9 +131,11 @@ private data class ViewportTransform(
 private const val REMOTE_IME_SENTINEL = " "
 
 /**
- * Real-time Hardware-Accelerated WebRTC Remote Desktop screen with synchronized Opus audio,
- * pinch-to-zoom/pan, Absolute Direct Touch & Relative Trackpad modes, retractable floating
- * `ModifierKeysBar` (`TASK-11`), and Android Virtual Keyboard overlay (`TASK-12`).
+ * Continuous Persistent Remote Desktop Viewer (`FIX-03` / `docs/fixes/fix-08.md`).
+ *
+ * Replaces the fragile WebRTC negotiation pipeline with a resilient, continuous HTTP multipart
+ * stream (`http://<host>:8444/screen.mjpg`) decoded at low RAM footprint via `RGB_565`.
+ * Controls input via the high-speed `UdpFastControlClient` on port `:8443/udp`.
  */
 @Composable
 fun RemoteDesktopScreen(
@@ -150,20 +150,27 @@ fun RemoteDesktopScreen(
     val sessionClient = remember(context) {
         DeckConnectionService.obtainClient(context.applicationContext)
     }
-    val webRtcManager = remember(context) {
-        WebRtcClientManager(context.applicationContext)
+
+    val connectionState by sessionClient.connectionState.collectAsStateWithLifecycle()
+    val host = remember(connectionState) {
+        (connectionState as? ConnectionState.Connected)?.host ?: "127.0.0.1"
     }
-    val viewerController = remember(sessionClient) {
-        RemoteScreenViewerController(
-            incomingEnvelopes = sessionClient.incomingEnvelopes,
+    val streamUrl = remember(host) { "http://$host:8444/screen.mjpg" }
+
+    val udpClient = remember(host) {
+        UdpFastControlClient(
+            host = host,
+            port = 8443,
+            sessionClient = sessionClient,
             scope = ioScope,
         )
     }
 
-    val streamState by webRtcManager.streamState.collectAsStateWithLifecycle()
-    val videoResolution by webRtcManager.videoResolution.collectAsStateWithLifecycle()
-    val isAudioMuted by webRtcManager.isAudioMuted.collectAsStateWithLifecycle()
-    val fallbackBitmap by viewerController.fallbackBitmap.collectAsStateWithLifecycle()
+    var desktopBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    var streamError by remember { mutableStateOf<String?>(null) }
+    var reconnectTrigger by remember { mutableIntStateOf(0) }
+    var videoResolution by remember { mutableStateOf(VideoResolution(1280, 720)) }
+    var isAudioMuted by remember { mutableStateOf(false) }
 
     var interactionMode by remember { mutableStateOf(RemoteInteractionMode.DIRECT_TOUCH) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
@@ -173,8 +180,6 @@ fun RemoteDesktopScreen(
     var isSoftKeyboardVisible by remember { mutableStateOf(false) }
     var lockedModifiers by remember { mutableStateOf<Set<StickyModifier>>(emptySet()) }
     val trackpadConfig = remember { TrackpadAccelerationConfig() }
-
-    var surfaceRendererRef by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
 
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -187,25 +192,93 @@ fun RemoteDesktopScreen(
         )
     }
 
-    // Start WebRTC stream on entry and strictly release SurfaceViewRenderer, PeerConnection,
-    // STOP_STREAM signal, and any held modifiers on exit.
     DisposableEffect(Unit) {
         val prevKeepScreenOn = view.keepScreenOn
         view.keepScreenOn = true
-        webRtcManager.startStream(streamConfig)
 
         onDispose {
             view.keepScreenOn = prevKeepScreenOn
+            udpClient.close()
 
             // Release any sticky modifiers held on Linux /dev/uinput
             val releaseTransition = StickyModifierHelper.releaseAll(lockedModifiers)
             releaseTransition.envelopes.forEach { sessionClient.sendAsync(it) }
+        }
+    }
 
-            // Explicitly release SurfaceViewRenderer, close PeerConnection, and send WebRtcSignal{STOP_STREAM}
-            viewerController.release()
-            webRtcManager.detachAndReleaseRenderer(surfaceRendererRef)
-            surfaceRendererRef = null
-            webRtcManager.stopStream(sendStopSignal = true)
+    // Continuous MJPEG stream reader running in Dispatchers.IO
+    LaunchedEffect(streamUrl, reconnectTrigger) {
+        withContext(Dispatchers.IO) {
+            val options = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.RGB_565 // Cuts RAM consumption by half
+                inMutable = true
+            }
+
+            while (isActive) {
+                var conn: HttpURLConnection? = null
+                var stream: BufferedInputStream? = null
+                try {
+                    streamError = null
+                    val url = URL(streamUrl)
+                    conn = (url.openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 3000
+                        readTimeout = 5000
+                        requestMethod = "GET"
+                        useCaches = false
+                        setRequestProperty("Connection", "close")
+                    }
+                    conn.connect()
+                    if (conn.responseCode != HttpURLConnection.HTTP_OK) {
+                        throw IOException("HTTP ${conn.responseCode}: ${conn.responseMessage}")
+                    }
+
+                    stream = BufferedInputStream(conn.inputStream, 64 * 1024)
+                    val buffer = ByteArrayOutputStream(128 * 1024)
+                    var prevByte = -1
+
+                    while (isActive) {
+                        val b = stream.read()
+                        if (b == -1) break
+
+                        // Detect JPEG SOI (0xFF, 0xD8)
+                        if (prevByte == 0xFF && b == 0xD8) {
+                            buffer.reset()
+                            buffer.write(0xFF)
+                            buffer.write(0xD8)
+                            prevByte = -1
+
+                            // Read until JPEG EOI (0xFF, 0xD9)
+                            var innerPrev = -1
+                            while (isActive) {
+                                val ib = stream.read()
+                                if (ib == -1) break
+                                buffer.write(ib)
+                                if (innerPrev == 0xFF && ib == 0xD9) {
+                                    val jpegBytes = buffer.toByteArray()
+                                    val bmp = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, options)
+                                    if (bmp != null) {
+                                        desktopBitmap = bmp.asImageBitmap()
+                                        if (bmp.width != videoResolution.width || bmp.height != videoResolution.height) {
+                                            videoResolution = VideoResolution(bmp.width, bmp.height)
+                                        }
+                                    }
+                                    break
+                                }
+                                innerPrev = ib
+                            }
+                        } else {
+                            prevByte = b
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (!isActive) break
+                    streamError = "Falha ao conectar no stream MJPEG: ${e.message ?: "Conexão encerrada"}"
+                    delay(1000) // Auto-reconnect after 1000ms
+                } finally {
+                    try { stream?.close() } catch (_: Exception) {}
+                    try { conn?.disconnect() } catch (_: Exception) {}
+                }
+            }
         }
     }
 
@@ -230,71 +303,27 @@ fun RemoteDesktopScreen(
         button: MouseButton?,
         action: ButtonAction?,
     ) {
-        ioScope.launch(Dispatchers.IO) {
-            val nowMs = System.currentTimeMillis()
-            val moveEnv = Envelope.newBuilder()
-                .setRequestId("abs-move-${UUID.randomUUID()}")
-                .setTimestampMs(nowMs)
-                .setMouseMoveEvent(
-                    MouseMoveEvent.newBuilder()
-                        .setNormX(normX.coerceIn(0f, 1f))
-                        .setNormY(normY.coerceIn(0f, 1f))
-                        .setIsAbsolute(true)
-                        .build(),
-                )
-                .build()
-            sessionClient.sendAsync(moveEnv)
+        val clampedX = normX.coerceIn(0f, 1f)
+        val clampedY = normY.coerceIn(0f, 1f)
+        udpClient.sendMouseAbsolute(clampedX, clampedY)
 
-            if (button != null && action != null) {
-                val btnEnv = Envelope.newBuilder()
-                    .setRequestId("abs-btn-${UUID.randomUUID()}")
-                    .setTimestampMs(nowMs)
-                    .setMouseButtonEvent(
-                        MouseButtonEvent.newBuilder()
-                            .setButton(button)
-                            .setAction(action)
-                            .build(),
-                    )
-                    .build()
-                sessionClient.sendAsync(btnEnv)
-            }
+        if (button != null && action != null) {
+            udpClient.sendMouseButton(button, action)
         }
     }
 
-    fun handleImeInput(insertedText: String) {
-        if (insertedText.isEmpty()) return
-        val activeMods = lockedModifiers
-        val hasChord = StickyModifier.CTRL in activeMods ||
-            StickyModifier.ALT in activeMods ||
-            StickyModifier.SUPER in activeMods
-
-        ioScope.launch(Dispatchers.IO) {
-            if (insertedText == "\n" || insertedText == "\r") {
-                sessionClient.sendAsync(StickyModifierHelper.buildKeyActionEnvelope("ENTER", ButtonAction.CLICK))
-                return@launch
+    fun handleImeInput(text: String) {
+        for (ch in text) {
+            sendEnvelopeOnIo {
+                StickyModifierHelper.buildKeyActionEnvelope(ch.toString(), ButtonAction.CLICK)
             }
-            if (insertedText == "\t") {
-                sessionClient.sendAsync(StickyModifierHelper.buildKeyActionEnvelope("TAB", ButtonAction.CLICK))
-                return@launch
-            }
-            if (hasChord && insertedText.length == 1 && insertedText[0].isLetterOrDigit()) {
-                val token = insertedText.uppercase(Locale.ROOT)
-                sessionClient.sendAsync(StickyModifierHelper.buildKeyActionEnvelope(token, ButtonAction.CLICK))
-                return@launch
-            }
-            val env = Envelope.newBuilder()
-                .setRequestId("remote-text-${UUID.randomUUID()}")
-                .setTimestampMs(System.currentTimeMillis())
-                .setKeyComboEvent(KeyComboEvent.newBuilder().setText(insertedText).build())
-                .build()
-            sessionClient.sendAsync(env)
         }
     }
 
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(Color(0xFF020617))
             .onSizeChanged { newSize ->
                 viewportSize = newSize
                 if (newSize.width > 0 && newSize.height > 0) {
@@ -311,7 +340,7 @@ fun RemoteDesktopScreen(
                 }
             },
     ) {
-        // Hidden BasicTextField capturing Android Soft Keyboard (IME) input over the video
+        // Hidden BasicTextField capturing Android Soft Keyboard (IME) input over the desktop
         BasicTextField(
             value = imeBuffer,
             onValueChange = { next ->
@@ -358,7 +387,7 @@ fun RemoteDesktopScreen(
                 .focusRequester(focusRequester),
         )
 
-        // 1. Hardware-Accelerated WebRTC Video Surface with transparent JPEG fallback
+        // 1. Continuous Screen Display Surface (scaled & panned around viewport center)
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -370,17 +399,64 @@ fun RemoteDesktopScreen(
                 },
             contentAlignment = Alignment.Center,
         ) {
-            RemoteScreenViewer(
-                webRtcManager = webRtcManager,
-                controller = viewerController,
-                onSurfaceRendererAttached = { renderer -> surfaceRendererRef = renderer },
-                onSurfaceRendererDetached = { renderer ->
-                    if (surfaceRendererRef === renderer) {
-                        surfaceRendererRef = null
+            val currentBmp = desktopBitmap
+            if (currentBmp != null) {
+                Image(
+                    bitmap = currentBmp,
+                    contentDescription = "Desktop Remoto Contínuo",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFF0F172A).copy(alpha = 0.90f),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.14f)),
+                    modifier = Modifier.padding(24.dp),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        if (streamError != null) {
+                            Text(
+                                text = streamError ?: "",
+                                color = Color(0xFFF87171),
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                            Surface(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { reconnectTrigger++ },
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color(0xFF0284C7),
+                            ) {
+                                Text(
+                                    text = "Reconectar Agora",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                )
+                            }
+                        } else {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(28.dp),
+                                strokeWidth = 2.5.dp,
+                                color = Color(0xFF38BDF8),
+                            )
+                            Text(
+                                text = "Conectando ao Stream Contínuo (:8444/screen.mjpg)...",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
                     }
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
+                }
+            }
         }
 
         // 2. Stationary Touch Interaction Overlay (Direct Absolute Touch OR Relative Trackpad)
@@ -422,15 +498,7 @@ fun RemoteDesktopScreen(
             }
         }
 
-        // 3. Stream status indicator while negotiating or on error
-        StreamStatusOverlay(
-            streamState = streamState,
-            isFallbackShowing = (fallbackBitmap != null),
-            onRetry = { webRtcManager.startStream(streamConfig) },
-            modifier = Modifier.align(Alignment.Center),
-        )
-
-        // 4. Floating HUD Controls (Top-Right) & Retractable ModifierKeysBar (Bottom)
+        // 3. Floating HUD Controls (Top-Right) & Retractable ModifierKeysBar (Bottom)
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -450,19 +518,15 @@ fun RemoteDesktopScreen(
                     interactionMode = mode
                 },
                 onResetZoom = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     transform = ViewportTransform(zoom = 1.0f, panX = 0f, panY = 0f)
                 },
                 onToggleMute = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    webRtcManager.setAudioMuted(!isAudioMuted)
+                    isAudioMuted = !isAudioMuted
                 },
                 onToggleModifierBar = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     isModifierBarExpanded = !isModifierBarExpanded
                 },
                 onToggleSoftKeyboard = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     val target = !isSoftKeyboardVisible
                     isSoftKeyboardVisible = target
                     if (target) {
@@ -473,17 +537,15 @@ fun RemoteDesktopScreen(
                     }
                 },
                 onReconnectStream = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    webRtcManager.startStream(streamConfig)
+                    reconnectTrigger++
                 },
                 modifier = Modifier.align(Alignment.TopEnd),
             )
 
+            // Retractable Modifier Keys Bar anchored at the bottom
             AnimatedVisibility(
                 visible = isModifierBarExpanded,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth(),
+                modifier = Modifier.align(Alignment.BottomCenter),
             ) {
                 ModifierKeysBar(
                     lockedModifiers = lockedModifiers,
@@ -557,147 +619,150 @@ private fun DirectAbsoluteTouchOverlay(
     val currentOnDragMove by rememberUpdatedState(onAbsoluteDragMove)
     val currentOnDragEnd by rememberUpdatedState(onAbsoluteDragEnd)
 
+    fun mapPoint(pos: Offset): MappedTouchCoordinate {
+        return TouchCoordinateMapper.mapTouchToNormalized(
+            touchX = pos.x,
+            touchY = pos.y,
+            viewWidth = currentViewport.width.toFloat(),
+            viewHeight = currentViewport.height.toFloat(),
+            streamWidth = currentStreamW,
+            streamHeight = currentStreamH,
+            zoom = currentTransform.zoom,
+            panX = currentTransform.panX,
+            panY = currentTransform.panY,
+        )
+    }
+
     Box(
         modifier = modifier.pointerInput(Unit) {
-            val tapSlopPx = 18f
-            val longPressMs = 450L
-            val minMoveIntervalMs = 8L
+            val tapSlopPx = viewConfiguration.touchSlop
+            val longPressMs = viewConfiguration.longPressTimeoutMillis
+            val minMoveIntervalMs = 12L
 
-            awaitPointerEventScope {
-                var isPinching = false
-                var isSingleDragging = false
-                var downPos = Offset.Zero
-                var lastSinglePos = Offset.Zero
-                var downUptimeMs = 0L
-                var lastMoveEmitMs = 0L
-                var rightClickTriggered = false
+            var isPinching = false
+            var downUptimeMs = 0L
+            var downPos = Offset.Zero
+            var lastSinglePos = Offset.Zero
+            var isSingleDragging = false
+            var rightClickTriggered = false
+            var lastMoveEmitMs = 0L
 
-                fun mapPoint(pos: Offset): MappedTouchCoordinate {
-                    val vw = currentViewport.width.toFloat()
-                    val vh = currentViewport.height.toFloat()
-                    val tf = currentTransform
-                    return TouchCoordinateMapper.mapTouchToNormalized(
-                        touchX = pos.x,
-                        touchY = pos.y,
-                        viewWidth = vw,
-                        viewHeight = vh,
-                        streamWidth = currentStreamW,
-                        streamHeight = currentStreamH,
-                        zoom = tf.zoom,
-                        panX = tf.panX,
-                        panY = tf.panY,
-                    )
+            while (true) {
+                val event = awaitPointerEventScope {
+                    awaitPointerEvent(PointerEventPass.Main)
                 }
 
-                while (true) {
-                    val event = awaitPointerEvent(PointerEventPass.Main)
-                    val pressed = event.changes.filter { it.pressed }
-                    val nowMs = event.changes.firstOrNull()?.uptimeMillis ?: SystemClock.uptimeMillis()
+                val nowMs = SystemClock.uptimeMillis()
+                val pressed = event.changes.filter { it.pressed }
 
-                    if (pressed.isEmpty()) {
+                if (pressed.isEmpty()) {
+                    if (!isPinching && downUptimeMs > 0L) {
                         if (isSingleDragging) {
                             val mapped = mapPoint(lastSinglePos)
                             currentOnDragEnd(mapped.normX, mapped.normY)
-                        } else if (!isPinching && !rightClickTriggered && downUptimeMs > 0L) {
-                            val mapped = mapPoint(lastSinglePos)
-                            if (mapped.isInsideVideo) {
-                                currentOnTap(mapped.normX, mapped.normY, MouseButton.LEFT)
-                            }
-                        }
-                        isPinching = false
-                        isSingleDragging = false
-                        rightClickTriggered = false
-                        downUptimeMs = 0L
-                        event.changes.forEach { it.consume() }
-                        continue
-                    }
-
-                    if (pressed.size >= 2) {
-                        if (isSingleDragging) {
-                            val mapped = mapPoint(lastSinglePos)
-                            currentOnDragEnd(mapped.normX, mapped.normY)
-                            isSingleDragging = false
-                        }
-                        isPinching = true
-                        val zoomChange = event.calculateZoom()
-                        val panChange = event.calculatePan()
-                        val centroid = event.calculateCentroid(useCurrent = false)
-
-                        val vw = currentViewport.width.toFloat()
-                        val vh = currentViewport.height.toFloat()
-                        if (vw > 0f && vh > 0f && centroid != Offset.Unspecified) {
-                            val oldTf = currentTransform
-                            val newZoom = (oldTf.zoom * zoomChange).coerceIn(
-                                TouchCoordinateMapper.MIN_ZOOM,
-                                TouchCoordinateMapper.MAX_ZOOM,
-                            )
-                            val actualScaleRatio = newZoom / oldTf.zoom
-                            val cx = vw * 0.5f
-                            val cy = vh * 0.5f
-
-                            // Anchor zoom around pinch centroid + apply 2-finger pan
-                            val rawPanX = (centroid.x - cx) * (1f - actualScaleRatio) +
-                                oldTf.panX * actualScaleRatio + panChange.x
-                            val rawPanY = (centroid.y - cy) * (1f - actualScaleRatio) +
-                                oldTf.panY * actualScaleRatio + panChange.y
-
-                            val clamped = TouchCoordinateMapper.clampPan(
-                                viewWidth = vw,
-                                viewHeight = vh,
-                                streamWidth = currentStreamW,
-                                streamHeight = currentStreamH,
-                                zoom = newZoom,
-                                panX = rawPanX,
-                                panY = rawPanY,
-                            )
-                            currentOnTransformChange(
-                                ViewportTransform(
-                                    zoom = newZoom,
-                                    panX = clamped.panX,
-                                    panY = clamped.panY,
-                                ),
-                            )
-                        }
-                        event.changes.forEach { it.consume() }
-                        continue
-                    }
-
-                    // Exactly 1 finger pressed
-                    if (!isPinching) {
-                        val pos = pressed[0].position
-                        if (downUptimeMs == 0L) {
-                            downUptimeMs = nowMs
-                            downPos = pos
-                            lastSinglePos = pos
-                        } else {
-                            lastSinglePos = pos
-                            val dist = hypot(pos.x - downPos.x, pos.y - downPos.y)
-                            if (!isSingleDragging && !rightClickTriggered) {
-                                if (dist > tapSlopPx) {
-                                    val startMapped = mapPoint(downPos)
-                                    if (startMapped.isInsideVideo) {
-                                        isSingleDragging = true
-                                        currentOnDragStart(startMapped.normX, startMapped.normY)
-                                        val currMapped = mapPoint(pos)
-                                        currentOnDragMove(currMapped.normX, currMapped.normY)
-                                        lastMoveEmitMs = nowMs
-                                    }
-                                } else if (nowMs - downUptimeMs >= longPressMs) {
-                                    val mapped = mapPoint(pos)
-                                    if (mapped.isInsideVideo) {
-                                        rightClickTriggered = true
-                                        currentOnTap(mapped.normX, mapped.normY, MouseButton.RIGHT)
-                                    }
+                        } else if (!rightClickTriggered) {
+                            val elapsed = nowMs - downUptimeMs
+                            val dist = hypot(lastSinglePos.x - downPos.x, lastSinglePos.y - downPos.y)
+                            if (dist <= tapSlopPx && elapsed < longPressMs) {
+                                val mapped = mapPoint(downPos)
+                                if (mapped.isInsideVideo) {
+                                    currentOnTap(mapped.normX, mapped.normY, MouseButton.LEFT)
                                 }
-                            } else if (isSingleDragging && nowMs - lastMoveEmitMs >= minMoveIntervalMs) {
-                                val mapped = mapPoint(pos)
-                                currentOnDragMove(mapped.normX, mapped.normY)
-                                lastMoveEmitMs = nowMs
                             }
                         }
+                    }
+
+                    isPinching = false
+                    downUptimeMs = 0L
+                    downPos = Offset.Zero
+                    lastSinglePos = Offset.Zero
+                    isSingleDragging = false
+                    rightClickTriggered = false
+                    continue
+                }
+
+                if (pressed.size >= 2) {
+                    if (isSingleDragging) {
+                        val mapped = mapPoint(lastSinglePos)
+                        currentOnDragEnd(mapped.normX, mapped.normY)
+                        isSingleDragging = false
+                    }
+                    isPinching = true
+                    downUptimeMs = 0L
+                    rightClickTriggered = false
+
+                    val zoomChange = event.calculateZoom()
+                    val panChange = event.calculatePan()
+                    val centroid = event.calculateCentroid()
+
+                    if (zoomChange != 1.0f || panChange != Offset.Zero) {
+                        val prev = currentTransform
+                        val targetZoom = (prev.zoom * zoomChange).coerceIn(1.0f, 4.0f)
+                        val viewW = currentViewport.width.toFloat()
+                        val viewH = currentViewport.height.toFloat()
+
+                        val cx = centroid.x - viewW / 2f
+                        val cy = centroid.y - viewH / 2f
+                        val rawPanX = (prev.panX - cx) * (targetZoom / prev.zoom) + cx + panChange.x
+                        val rawPanY = (prev.panY - cy) * (targetZoom / prev.zoom) + cy + panChange.y
+
+                        val clamped = TouchCoordinateMapper.clampPan(
+                            viewWidth = viewW,
+                            viewHeight = viewH,
+                            streamWidth = currentStreamW,
+                            streamHeight = currentStreamH,
+                            zoom = targetZoom,
+                            panX = rawPanX,
+                            panY = rawPanY,
+                        )
+
+                        currentOnTransformChange(
+                            ViewportTransform(
+                                zoom = targetZoom,
+                                panX = clamped.panX,
+                                panY = clamped.panY,
+                            ),
+                        )
                     }
                     event.changes.forEach { it.consume() }
+                    continue
                 }
+
+                // Exactly 1 finger pressed
+                if (!isPinching) {
+                    val pos = pressed[0].position
+                    if (downUptimeMs == 0L) {
+                        downUptimeMs = nowMs
+                        downPos = pos
+                        lastSinglePos = pos
+                    } else {
+                        lastSinglePos = pos
+                        val dist = hypot(pos.x - downPos.x, pos.y - downPos.y)
+                        if (!isSingleDragging && !rightClickTriggered) {
+                            if (dist > tapSlopPx) {
+                                val startMapped = mapPoint(downPos)
+                                if (startMapped.isInsideVideo) {
+                                    isSingleDragging = true
+                                    currentOnDragStart(startMapped.normX, startMapped.normY)
+                                    val currMapped = mapPoint(pos)
+                                    currentOnDragMove(currMapped.normX, currMapped.normY)
+                                    lastMoveEmitMs = nowMs
+                                }
+                            } else if (nowMs - downUptimeMs >= longPressMs) {
+                                val mapped = mapPoint(pos)
+                                if (mapped.isInsideVideo) {
+                                    rightClickTriggered = true
+                                    currentOnTap(mapped.normX, mapped.normY, MouseButton.RIGHT)
+                                }
+                            }
+                        } else if (isSingleDragging && nowMs - lastMoveEmitMs >= minMoveIntervalMs) {
+                            val mapped = mapPoint(pos)
+                            currentOnDragMove(mapped.normX, mapped.normY)
+                            lastMoveEmitMs = nowMs
+                        }
+                    }
+                }
+                event.changes.forEach { it.consume() }
             }
         },
     )
@@ -746,7 +811,7 @@ private fun FloatingRemoteHudMenu(
                         }
                         onSelectMode(next)
                     },
-                    modifier = Modifier.size(34.dp),
+                    modifier = Modifier.size(36.dp),
                 ) {
                     Icon(
                         imageVector = if (interactionMode == RemoteInteractionMode.DIRECT_TOUCH) {
@@ -754,66 +819,53 @@ private fun FloatingRemoteHudMenu(
                         } else {
                             Icons.Rounded.Mouse
                         },
-                        contentDescription = "Alternar modo de toque",
+                        contentDescription = "Alternar Modo de Toque",
                         tint = Color(0xFF38BDF8),
                         modifier = Modifier.size(18.dp),
                     )
                 }
 
-                if (zoom > 1.02f) {
+                IconButton(
+                    onClick = onToggleSoftKeyboard,
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Keyboard,
+                        contentDescription = "Teclado Virtual",
+                        tint = if (isSoftKeyboardVisible) Color(0xFFFACC15) else Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+
+                if (zoom > 1.05f) {
                     IconButton(
                         onClick = onResetZoom,
-                        modifier = Modifier.size(34.dp),
+                        modifier = Modifier.size(36.dp),
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.CenterFocusStrong,
-                            contentDescription = "Resetar zoom 1.0x",
-                            tint = Color(0xFFFBBF24),
+                            contentDescription = "Resetar Zoom",
+                            tint = Color(0xFF34D399),
                             modifier = Modifier.size(18.dp),
                         )
                     }
                 }
 
                 IconButton(
-                    onClick = onToggleModifierBar,
-                    modifier = Modifier.size(34.dp),
-                ) {
-                    Text(
-                        text = "Fn",
-                        color = if (isModifierBarExpanded) Color(0xFF38BDF8) else Color.White,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-
-                IconButton(
-                    onClick = onToggleSoftKeyboard,
-                    modifier = Modifier.size(34.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Keyboard,
-                        contentDescription = "Abrir teclado virtual",
-                        tint = if (isSoftKeyboardVisible) Color(0xFF38BDF8) else Color.White,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-
-                IconButton(
                     onClick = onToggleMenu,
-                    modifier = Modifier.size(34.dp),
+                    modifier = Modifier.size(36.dp),
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Tune,
-                        contentDescription = "Menu do Desktop Remoto",
-                        tint = if (isMenuExpanded) Color(0xFF38BDF8) else Color.White.copy(alpha = 0.85f),
+                        contentDescription = "Menu Desktop Remoto",
+                        tint = if (isMenuExpanded) Color(0xFF38BDF8) else Color.White.copy(alpha = 0.8f),
                         modifier = Modifier.size(18.dp),
                     )
                 }
             }
         }
 
-        // Expanded floating menu for selecting interaction mode, audio mute, and stream refresh
+        // Expanded Options Card
         AnimatedVisibility(visible = isMenuExpanded) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
@@ -861,7 +913,7 @@ private fun FloatingRemoteHudMenu(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Icon(
-                                    imageVector = if (isAudioMuted) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
+                                    imageVector = if (isAudioMuted) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
                                     contentDescription = null,
                                     tint = if (isAudioMuted) Color(0xFFF87171) else Color(0xFF34D399),
                                     modifier = Modifier.size(16.dp),
@@ -901,118 +953,6 @@ private fun FloatingRemoteHudMenu(
                             }
                         }
                     }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun StreamStatusOverlay(
-    streamState: StreamConnectionState,
-    isFallbackShowing: Boolean,
-    onRetry: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    if (isFallbackShowing && streamState !is StreamConnectionState.Failed) {
-        return
-    }
-    when (streamState) {
-        is StreamConnectionState.Streaming -> {
-            if (streamState.firstFrameRendered) return
-            StatusBadgeCard(
-                message = "Recebendo quadros H.264 (${streamState.videoWidth}x${streamState.videoHeight})...",
-                showSpinner = true,
-                onRetry = null,
-                modifier = modifier,
-            )
-        }
-
-        StreamConnectionState.Idle,
-        StreamConnectionState.RequestingOffer -> {
-            StatusBadgeCard(
-                message = "Iniciando Desktop Remoto WebRTC...",
-                showSpinner = true,
-                onRetry = null,
-                modifier = modifier,
-            )
-        }
-
-        StreamConnectionState.NegotiatingIce -> {
-            StatusBadgeCard(
-                message = "Negociando SDP & ICE de baixa latência...",
-                showSpinner = true,
-                onRetry = null,
-                modifier = modifier,
-            )
-        }
-
-        StreamConnectionState.Stopped -> {
-            StatusBadgeCard(
-                message = "Stream encerrado",
-                showSpinner = false,
-                onRetry = onRetry,
-                modifier = modifier,
-            )
-        }
-
-        is StreamConnectionState.Failed -> {
-            StatusBadgeCard(
-                message = streamState.reason,
-                showSpinner = false,
-                onRetry = onRetry,
-                modifier = modifier,
-            )
-        }
-    }
-}
-
-@Composable
-private fun StatusBadgeCard(
-    message: String,
-    showSpinner: Boolean,
-    onRetry: (() -> Unit)?,
-    modifier: Modifier = Modifier,
-) {
-    Surface(
-        modifier = modifier.padding(24.dp),
-        shape = RoundedCornerShape(18.dp),
-        color = Color(0xFF0F172A).copy(alpha = 0.90f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.14f)),
-    ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            if (showSpinner) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(26.dp),
-                    strokeWidth = 2.5.dp,
-                    color = Color(0xFF38BDF8),
-                )
-            }
-            Text(
-                text = message,
-                color = Color.White,
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
-            )
-            if (onRetry != null) {
-                Surface(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable(onClick = onRetry),
-                    shape = RoundedCornerShape(10.dp),
-                    color = Color(0xFF0284C7),
-                ) {
-                    Text(
-                        text = "Tentar Novamente",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                    )
                 }
             }
         }

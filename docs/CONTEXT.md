@@ -178,3 +178,63 @@ Os agentes devem atualizar o status abaixo ao finalizar e validar cada etapa:
 | **TASK-11** | Android: Trackpad Virtual Multi-gesto e Barra de Modificadores | `TASK-04`, `TASK-09` | `[x] Concluída` |
 | **TASK-12** | Android: Desktop Remoto WebRTC e Mapeamento de Toque | `TASK-04`, `TASK-08`, `TASK-09`, `TASK-11` | `[x] Concluída` |
 | **TASK-13** | Android: Emulador de Terminal Integrado (PTY) e Polimento Final | `TASK-05`, `TASK-09` a `TASK-12` | `[x] Concluída` |
+
+---
+
+> **Estado Atual do Projeto (Pós-Testes v1/v2):**
+> * **Reprodutor de Mídia (MPRIS2 + WirePlumber/PipeWire):** Estável e 100% funcional (NÃO MODIFICAR).
+> * **Trackpad Virtual (`/dev/uinput`):** Rastreamento e precisão excelentes (manter lógica de gestos e migrar transporte para UDP Fast-Lane).
+> * **Foco Crítico da v3 (Correções Obrigatórias):** Eliminar os picos de latência de $430\text{ ms}$ (Head-of-Line blocking no TCP), erradicar os crashes/travamentos do Terminal Remoto e substituir o loop infinito do WebRTC na Tela Remota por um pipeline de streaming persistente e resiliente.
+
+---
+
+## 1. Mudança Arquitetural da v3 (Dual-Channel + Motores Dedicados)
+
+Os testes práticos demonstraram que trafegar eventos de tempo real (Trackpad/Ping), bytes brutos de PTY e vídeo sobre um único socket TCP/Protobuf gera **Head-of-Line (HoL) Blocking** no buffer do kernel Linux e no túnel ADB, além de causar **ANR / Crash** no Android ao tentar renderizar sequências VT100/ANSI complexas diretamente em componentes `Text()` do Jetpack Compose.
+
+A arquitetura v3 do **LowDeck** resolve esses três problemas na raiz dividindo o transporte e os motores de renderização:
+
+| Subsistema | Arquitetura Antiga (v1/v2 - Depreciada) | Nova Arquitetura (v3 - Obrigatória) |
+| :--- | :--- | :--- |
+| **Transporte de Baixa Latência (Ping & Trackpad)** | Multiplexado no mesmo socket TCP/WebSocket (`:8443`), sofrendo filas de até $430\text{ ms}$. | **UDP Fast-Lane (`:8443/udp`)**: Datagramas binários puros de $5$ a $9\text{ bytes}$ com flag `IPTOS_LOWDELAY` ($0\text{x}10$), zero alocação e zero bloqueio de fila. |
+| **Terminal Remoto (PTY)** | Strings Protobuf + `Text()` no Jetpack Compose (causava crash por UTF-8 quebrado e recomposição infinita na Main Thread). | **`xterm.js` + WebSocket Binário Dedicado (`:8444/ws/pty`)**: O daemon serve o motor `xterm.js` localmente e transmite bytes PTY brutos sem passar pelo Protobuf; o Android renderiza em uma `WebView` acelerada por hardware isolada da UI Thread. |
+| **Tela Remota (Desktop)** | WebRTC (Pion) com negociação SDP/ICE complexa (ficava presa em loop infinito) ou `fork/exec` por frame. | **Stream Contínuo MJPEG via Processo Persistente Único (`:8444/screen.mjpg`)**: Pipeline único sob demanda (`GStreamer PipeWire` $\rightarrow$ `FFmpeg X11/KMS` $\rightarrow$ `wf-recorder`) lido via `multipart/x-mixed-replace` e decodificado em `Bitmap.Config.RGB_565` no Android. |
+| **Conexão via Cabo USB** | Apenas `adb reverse` (que serializa tudo em um túnel TCP Bulk único no `adbd`). | **Suporte Nativo a USB Tethering (RNDIS `usb0`) + Fallback `adb reverse`**: Prioriza a interface de rede USB direta para habilitar UDP nativo a $1\text{ ms}$ de latência. |
+
+---
+
+## 2. Mapa de Portas e Canais do LowDeck v3
+
+1. **Porta `:8443/tcp` (Canal de Controle Seguro WebSocket/Protobuf):**
+   * Usado exclusivamente para: Pareamento/Auth, Sincronização de Botões do Macro Deck, Execução de Macros, Controle de Mídia (`wpctl`/MPRIS2) e Telemetria leve.
+2. **Porta `:8443/udp` (UDP Fast-Lane — Especificado no `FIX-01`):**
+   * Usado exclusivamente para: Movimento relativo do Trackpad, Posicionamento absoluto de toque na Tela Remota, Cliques/Scroll de Mouse e Heartbeat/Ping de precisão em microssegundos.
+3. **Porta `:8444/tcp` (Servidor Local de Mídia Pesada e PTY — Especificado nos `FIX-02` e `FIX-03`):**
+   * `GET /terminal`: Serve a interface HTML/Canvas enxuta com `xterm.js` e `xterm-addon-fit`.
+   * `GET /ws/pty`: WebSocket binário puro ligado diretamente ao descritor `/dev/ptmx` (`creack/pty`).
+   * `GET /screen.mjpg`: Stream HTTP `multipart/x-mixed-replace; boundary=frame` contínuo gerado por um único processo filho persistente enquanto o cliente estiver na aba de Tela Remota.
+
+---
+
+## 3. Regras de Ouro para os Agentes na Execução dos Fixes v3
+
+1. **Não Toque no que Está Funcionando:**
+   * Mantenha intocados os módulos de **Controle de Mídia (`audio_system.go` / MPRIS2)** e a **lógica de gestos do Trackpad**, alterando no Trackpad apenas a chamada de envio de rede para priorizar o cliente UDP (`UdpFastControlClient`).
+2. **Proibido Passar Dados do Terminal ou Vídeo pelo Protobuf Principal:**
+   * Remova ou desative qualquer handler que envie `PtyDataEvent` ou frames de imagem pelo socket WebSocket Protobuf da porta `:8443/tcp`. Isso é o que causava o bloqueio de $430\text{ ms}$ nos outros componentes.
+3. **Ciclo de Vida Estrito de Processos (`context.Context`):**
+   * No `FIX-02` (PTY) e no `FIX-03` (Tela Remota), quando a conexão HTTP/WebSocket da porta `:8444` fechar, o processo filho (`bash`/`zsh` ou `gst-launch-1.0`/`ffmpeg`) **deve** receber `SIGKILL`/`SIGTERM` imediatamente e ter seus file descriptors liberados.
+4. **Zero Operações Pesadas na Main Thread do Android:**
+   * A leitura do stream `/screen.mjpg` e o envio de pacotes UDP devem rodar estritamente em `Dispatchers.IO`.
+
+---
+
+## 4. Rastreamento de Execução dos Fixes (`Fix Tracker v3`)
+
+Os agentes devem executar os arquivos de especificação abaixo em ordem e marcar como `[x] Concluído` após passar nos testes de validação:
+
+| ID | Arquivo de Especificação | Problema Resolvido | Status |
+| :--- | :--- | :--- | :--- |
+| **FIX-01** | `docs/fixes/FIX-01-UDP-FASTLANE.md` | Picos de latência de $430\text{ ms}$ no cabo/Wi-Fi e HoL blocking no Trackpad/Ping. | `[x] Concluído` |
+| **FIX-02** | `docs/fixes/FIX-02-XTERM-PTY.md` | Lentidão extrema e crash fatal do app Android após carregar o Terminal Remoto. | `[x] Concluído` |
+| **FIX-03** | `docs/fixes/FIX-03-PERSISTENT-SCREEN.md` (ou `fix-08.md`) | Loop infinito no WebRTC e ausência de sinal de vida na Tela Remota com stream MJPEG contínuo. | `[x] Concluído` |

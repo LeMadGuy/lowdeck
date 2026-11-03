@@ -80,6 +80,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.linuxdeck.client.fixes.RemoteScreenViewer
+import com.linuxdeck.client.fixes.RemoteScreenViewerController
 import com.linuxdeck.client.network.DeckConnectionService
 import com.linuxdeck.client.protocol.v1.ButtonAction
 import com.linuxdeck.client.protocol.v1.Envelope
@@ -151,10 +153,17 @@ fun RemoteDesktopScreen(
     val webRtcManager = remember(context) {
         WebRtcClientManager(context.applicationContext)
     }
+    val viewerController = remember(sessionClient) {
+        RemoteScreenViewerController(
+            incomingEnvelopes = sessionClient.incomingEnvelopes,
+            scope = ioScope,
+        )
+    }
 
     val streamState by webRtcManager.streamState.collectAsStateWithLifecycle()
     val videoResolution by webRtcManager.videoResolution.collectAsStateWithLifecycle()
     val isAudioMuted by webRtcManager.isAudioMuted.collectAsStateWithLifecycle()
+    val fallbackBitmap by viewerController.fallbackBitmap.collectAsStateWithLifecycle()
 
     var interactionMode by remember { mutableStateOf(RemoteInteractionMode.DIRECT_TOUCH) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
@@ -193,6 +202,7 @@ fun RemoteDesktopScreen(
             releaseTransition.envelopes.forEach { sessionClient.sendAsync(it) }
 
             // Explicitly release SurfaceViewRenderer, close PeerConnection, and send WebRtcSignal{STOP_STREAM}
+            viewerController.release()
             webRtcManager.detachAndReleaseRenderer(surfaceRendererRef)
             surfaceRendererRef = null
             webRtcManager.stopStream(sendStopSignal = true)
@@ -348,7 +358,7 @@ fun RemoteDesktopScreen(
                 .focusRequester(focusRequester),
         )
 
-        // 1. Hardware-Accelerated WebRTC Video Surface (scaled & panned around viewport center)
+        // 1. Hardware-Accelerated WebRTC Video Surface with transparent JPEG fallback
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -360,34 +370,11 @@ fun RemoteDesktopScreen(
                 },
             contentAlignment = Alignment.Center,
         ) {
-            AndroidView(
-                factory = { ctx ->
-                    FrameLayout(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                        )
-                        val renderer = SurfaceViewRenderer(ctx).apply {
-                            layoutParams = FrameLayout.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                            )
-                        }
-                        addView(renderer)
-                        surfaceRendererRef = renderer
-                        webRtcManager.attachRenderer(renderer)
-                    }
-                },
-                update = { container ->
-                    val renderer = container.getChildAt(0) as? SurfaceViewRenderer
-                    if (renderer != null && surfaceRendererRef !== renderer) {
-                        surfaceRendererRef = renderer
-                        webRtcManager.attachRenderer(renderer)
-                    }
-                },
-                onRelease = { container ->
-                    val renderer = container.getChildAt(0) as? SurfaceViewRenderer
-                    webRtcManager.detachAndReleaseRenderer(renderer)
+            RemoteScreenViewer(
+                webRtcManager = webRtcManager,
+                controller = viewerController,
+                onSurfaceRendererAttached = { renderer -> surfaceRendererRef = renderer },
+                onSurfaceRendererDetached = { renderer ->
                     if (surfaceRendererRef === renderer) {
                         surfaceRendererRef = null
                     }
@@ -438,6 +425,7 @@ fun RemoteDesktopScreen(
         // 3. Stream status indicator while negotiating or on error
         StreamStatusOverlay(
             streamState = streamState,
+            isFallbackShowing = (fallbackBitmap != null),
             onRetry = { webRtcManager.startStream(streamConfig) },
             modifier = Modifier.align(Alignment.Center),
         )
@@ -922,9 +910,13 @@ private fun FloatingRemoteHudMenu(
 @Composable
 private fun StreamStatusOverlay(
     streamState: StreamConnectionState,
+    isFallbackShowing: Boolean,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    if (isFallbackShowing && streamState !is StreamConnectionState.Failed) {
+        return
+    }
     when (streamState) {
         is StreamConnectionState.Streaming -> {
             if (streamState.firstFrameRendered) return

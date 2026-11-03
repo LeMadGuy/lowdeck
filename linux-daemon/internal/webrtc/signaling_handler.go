@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/local/linux-deck-daemon/fixes"
 	"github.com/local/linux-deck-daemon/internal/server"
 	pb "github.com/local/linux-deck-daemon/pkg/protocol/v1"
 	pionwebrtc "github.com/pion/webrtc/v4"
@@ -22,8 +23,10 @@ type SignalingHandler struct {
 	sourceFactory MediaSourceFactory
 	logger        *slog.Logger
 
-	mu       sync.Mutex
-	sessions map[string]*StreamSession
+	mu        sync.Mutex
+	sessions  map[string]*StreamSession
+	watchdogs map[string]*fixes.WebRTCHandshakeWatchdog
+	fallbacks map[string]*fixes.ScreenJpegFallbackStreamer
 }
 
 // NewSignalingHandler creates a SignalingHandler for managing per-client WebRTC streams.
@@ -36,6 +39,8 @@ func NewSignalingHandler(configDir string, sourceFactory MediaSourceFactory, log
 		sourceFactory: sourceFactory,
 		logger:        logger,
 		sessions:      make(map[string]*StreamSession),
+		watchdogs:     make(map[string]*fixes.WebRTCHandshakeWatchdog),
+		fallbacks:     make(map[string]*fixes.ScreenJpegFallbackStreamer),
 	}
 }
 
@@ -86,6 +91,14 @@ func (h *SignalingHandler) HandleSignal(ctx context.Context, client server.Clien
 			h.mu.Lock()
 			if target != nil && h.sessions[clientID] == target {
 				delete(h.sessions, clientID)
+				if wd, ok := h.watchdogs[clientID]; ok {
+					delete(h.watchdogs, clientID)
+					wd.Stop()
+				}
+				if fb, ok := h.fallbacks[clientID]; ok {
+					delete(h.fallbacks, clientID)
+					fb.Stop()
+				}
 			}
 			h.mu.Unlock()
 		}
@@ -108,12 +121,36 @@ func (h *SignalingHandler) HandleSignal(ctx context.Context, client server.Clien
 			return fmt.Errorf("webrtc start stream: %w", err)
 		}
 
+		fallback := fixes.NewScreenJpegFallbackStreamer(fixes.FallbackConfig{
+			Width:       sig.Width,
+			Height:      sig.Height,
+			FPS:         12,
+			JpegQuality: 65,
+			Logger:      h.logger,
+		}, client.Send)
+
+		watchdog := fixes.NewWebRTCHandshakeWatchdog(
+			fixes.DefaultWebRTCHandshakeTimeout,
+			h.logger,
+			func() {
+				_ = fallback.Start(sessCtx)
+			},
+			func() {
+				fallback.Stop()
+			},
+		)
+
+		sess.SetICEConnectionStateListener(watchdog.NotifyICEState)
+		watchdog.Start(sessCtx)
+
 		createdMu.Lock()
 		created = sess
 		createdMu.Unlock()
 
 		h.mu.Lock()
 		h.sessions[clientID] = sess
+		h.watchdogs[clientID] = watchdog
+		h.fallbacks[clientID] = fallback
 		h.mu.Unlock()
 
 		if err := sess.BeginOffer(); err != nil {
@@ -160,8 +197,22 @@ func (h *SignalingHandler) CloseClientStream(clientID string) {
 	if ok {
 		delete(h.sessions, clientID)
 	}
+	wd, okWd := h.watchdogs[clientID]
+	if okWd {
+		delete(h.watchdogs, clientID)
+	}
+	fb, okFb := h.fallbacks[clientID]
+	if okFb {
+		delete(h.fallbacks, clientID)
+	}
 	h.mu.Unlock()
 
+	if wd != nil {
+		wd.Stop()
+	}
+	if fb != nil {
+		fb.Stop()
+	}
 	if sess != nil {
 		_ = sess.Close()
 	}
@@ -174,6 +225,14 @@ func (h *SignalingHandler) CloseAll() {
 	for id, sess := range h.sessions {
 		list = append(list, sess)
 		delete(h.sessions, id)
+	}
+	for id, wd := range h.watchdogs {
+		wd.Stop()
+		delete(h.watchdogs, id)
+	}
+	for id, fb := range h.fallbacks {
+		fb.Stop()
+		delete(h.fallbacks, id)
 	}
 	h.mu.Unlock()
 

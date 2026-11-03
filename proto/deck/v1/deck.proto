@@ -47,6 +47,9 @@ message Envelope {
 
     // WebRTC Signaling
     WebRtcSignal webrtc_signal = 60;
+
+    // Remote Screen Frame Fallback (JPEG over WebSocket)
+    ScreenFrame screen_frame = 70;
   }
 }
 
@@ -331,6 +334,7 @@ enum SignalType {
   SDP_OFFER = 3;
   SDP_ANSWER = 4;
   ICE_CANDIDATE = 5;
+  FALLBACK_ACTIVE = 6;
 }
 
 message WebRtcSignal {
@@ -342,4 +346,13 @@ message WebRtcSignal {
   uint32 bitrate_kbps = 6;
   bool audio_enabled = 7;
 }
+
+message ScreenFrame {
+  bytes data = 1;          // JPEG compressed image bytes
+  uint32 width = 2;
+  uint32 height = 3;
+  uint64 sequence = 4;
+  int64 timestamp_ms = 5;
+}
+
 

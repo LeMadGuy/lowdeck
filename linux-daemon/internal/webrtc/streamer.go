@@ -94,6 +94,7 @@ type StreamSession struct {
 	remoteReady        atomic.Bool
 	closeOnce          sync.Once
 	closed             atomic.Bool
+	iceListener        func(pionwebrtc.ICEConnectionState)
 }
 
 // NewStreamSession initializes a WebRTC PeerConnection with H.264 + Opus tracks, starts the
@@ -230,6 +231,16 @@ func NewStreamSession(
 		}
 	})
 
+	pc.OnICEConnectionStateChange(func(state pionwebrtc.ICEConnectionState) {
+		logger.Debug("webrtc ice connection state changed", "state", state.String())
+		sess.mu.Lock()
+		listener := sess.iceListener
+		sess.mu.Unlock()
+		if listener != nil {
+			listener(state)
+		}
+	})
+
 	if err := mediaSrc.Start(streamCtx); err != nil {
 		cancel()
 		_ = pc.Close()
@@ -247,6 +258,13 @@ func NewStreamSession(
 	}()
 
 	return sess, nil
+}
+
+// SetICEConnectionStateListener registers a callback invoked when the ICE connection state changes.
+func (s *StreamSession) SetICEConnectionStateListener(fn func(pionwebrtc.ICEConnectionState)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.iceListener = fn
 }
 
 // BeginOffer generates the SDP Offer, sets the local description, sends SDP_OFFER to the client,

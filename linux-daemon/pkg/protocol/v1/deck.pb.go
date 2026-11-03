@@ -433,6 +433,7 @@ const (
 	SignalType_SDP_OFFER               SignalType = 3
 	SignalType_SDP_ANSWER              SignalType = 4
 	SignalType_ICE_CANDIDATE           SignalType = 5
+	SignalType_FALLBACK_ACTIVE         SignalType = 6
 )
 
 // Enum value maps for SignalType.
@@ -444,6 +445,7 @@ var (
 		3: "SDP_OFFER",
 		4: "SDP_ANSWER",
 		5: "ICE_CANDIDATE",
+		6: "FALLBACK_ACTIVE",
 	}
 	SignalType_value = map[string]int32{
 		"SIGNAL_TYPE_UNSPECIFIED": 0,
@@ -452,6 +454,7 @@ var (
 		"SDP_OFFER":               3,
 		"SDP_ANSWER":              4,
 		"ICE_CANDIDATE":           5,
+		"FALLBACK_ACTIVE":         6,
 	}
 )
 
@@ -512,6 +515,7 @@ type Envelope struct {
 	//	*Envelope_MediaStatusEvent
 	//	*Envelope_PowerControlCommand
 	//	*Envelope_WebrtcSignal
+	//	*Envelope_ScreenFrame
 	Payload       isEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -775,6 +779,15 @@ func (x *Envelope) GetWebrtcSignal() *WebRtcSignal {
 	return nil
 }
 
+func (x *Envelope) GetScreenFrame() *ScreenFrame {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_ScreenFrame); ok {
+			return x.ScreenFrame
+		}
+	}
+	return nil
+}
+
 type isEnvelope_Payload interface {
 	isEnvelope_Payload()
 }
@@ -877,6 +890,11 @@ type Envelope_WebrtcSignal struct {
 	WebrtcSignal *WebRtcSignal `protobuf:"bytes,60,opt,name=webrtc_signal,json=webrtcSignal,proto3,oneof"`
 }
 
+type Envelope_ScreenFrame struct {
+	// Remote Screen Frame Fallback (JPEG over WebSocket)
+	ScreenFrame *ScreenFrame `protobuf:"bytes,70,opt,name=screen_frame,json=screenFrame,proto3,oneof"`
+}
+
 func (*Envelope_HandshakeRequest) isEnvelope_Payload() {}
 
 func (*Envelope_HandshakeResponse) isEnvelope_Payload() {}
@@ -922,6 +940,8 @@ func (*Envelope_MediaStatusEvent) isEnvelope_Payload() {}
 func (*Envelope_PowerControlCommand) isEnvelope_Payload() {}
 
 func (*Envelope_WebrtcSignal) isEnvelope_Payload() {}
+
+func (*Envelope_ScreenFrame) isEnvelope_Payload() {}
 
 type HandshakeRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -2763,12 +2783,88 @@ func (x *WebRtcSignal) GetAudioEnabled() bool {
 	return false
 }
 
+type ScreenFrame struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"` // JPEG compressed image bytes
+	Width         uint32                 `protobuf:"varint,2,opt,name=width,proto3" json:"width,omitempty"`
+	Height        uint32                 `protobuf:"varint,3,opt,name=height,proto3" json:"height,omitempty"`
+	Sequence      uint64                 `protobuf:"varint,4,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	TimestampMs   int64                  `protobuf:"varint,5,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ScreenFrame) Reset() {
+	*x = ScreenFrame{}
+	mi := &file_deck_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScreenFrame) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScreenFrame) ProtoMessage() {}
+
+func (x *ScreenFrame) ProtoReflect() protoreflect.Message {
+	mi := &file_deck_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScreenFrame.ProtoReflect.Descriptor instead.
+func (*ScreenFrame) Descriptor() ([]byte, []int) {
+	return file_deck_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *ScreenFrame) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *ScreenFrame) GetWidth() uint32 {
+	if x != nil {
+		return x.Width
+	}
+	return 0
+}
+
+func (x *ScreenFrame) GetHeight() uint32 {
+	if x != nil {
+		return x.Height
+	}
+	return 0
+}
+
+func (x *ScreenFrame) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *ScreenFrame) GetTimestampMs() int64 {
+	if x != nil {
+		return x.TimestampMs
+	}
+	return 0
+}
+
 var File_deck_proto protoreflect.FileDescriptor
 
 const file_deck_proto_rawDesc = "" +
 	"\n" +
 	"\n" +
-	"deck.proto\x12\adeck.v1\"\xf4\f\n" +
+	"deck.proto\x12\adeck.v1\"\xaf\r\n" +
 	"\bEnvelope\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12!\n" +
@@ -2796,7 +2892,8 @@ const file_deck_proto_rawDesc = "" +
 	"\x15media_control_command\x183 \x01(\v2\x1c.deck.v1.MediaControlCommandH\x00R\x13mediaControlCommand\x12I\n" +
 	"\x12media_status_event\x184 \x01(\v2\x19.deck.v1.MediaStatusEventH\x00R\x10mediaStatusEvent\x12R\n" +
 	"\x15power_control_command\x185 \x01(\v2\x1c.deck.v1.PowerControlCommandH\x00R\x13powerControlCommand\x12<\n" +
-	"\rwebrtc_signal\x18< \x01(\v2\x15.deck.v1.WebRtcSignalH\x00R\fwebrtcSignalB\t\n" +
+	"\rwebrtc_signal\x18< \x01(\v2\x15.deck.v1.WebRtcSignalH\x00R\fwebrtcSignal\x129\n" +
+	"\fscreen_frame\x18F \x01(\v2\x14.deck.v1.ScreenFrameH\x00R\vscreenFrameB\t\n" +
 	"\apayload\"\xa2\x01\n" +
 	"\x10HandshakeRequest\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12\x1b\n" +
@@ -2969,7 +3066,13 @@ const file_deck_proto_rawDesc = "" +
 	"\x06height\x18\x04 \x01(\rR\x06height\x12\x10\n" +
 	"\x03fps\x18\x05 \x01(\rR\x03fps\x12!\n" +
 	"\fbitrate_kbps\x18\x06 \x01(\rR\vbitrateKbps\x12#\n" +
-	"\raudio_enabled\x18\a \x01(\bR\faudioEnabled*w\n" +
+	"\raudio_enabled\x18\a \x01(\bR\faudioEnabled\"\x8e\x01\n" +
+	"\vScreenFrame\x12\x12\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\x12\x14\n" +
+	"\x05width\x18\x02 \x01(\rR\x05width\x12\x16\n" +
+	"\x06height\x18\x03 \x01(\rR\x06height\x12\x1a\n" +
+	"\bsequence\x18\x04 \x01(\x04R\bsequence\x12!\n" +
+	"\ftimestamp_ms\x18\x05 \x01(\x03R\vtimestampMs*w\n" +
 	"\rSessionStatus\x12\x1e\n" +
 	"\x1aSESSION_STATUS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eSESSION_ACTIVE\x10\x01\x12\x14\n" +
@@ -3023,7 +3126,7 @@ const file_deck_proto_rawDesc = "" +
 	"\aSUSPEND\x10\x03\x12\n" +
 	"\n" +
 	"\x06REBOOT\x10\x04\x12\f\n" +
-	"\bPOWEROFF\x10\x05*~\n" +
+	"\bPOWEROFF\x10\x05*\x93\x01\n" +
 	"\n" +
 	"SignalType\x12\x1b\n" +
 	"\x17SIGNAL_TYPE_UNSPECIFIED\x10\x00\x12\x10\n" +
@@ -3032,7 +3135,8 @@ const file_deck_proto_rawDesc = "" +
 	"\tSDP_OFFER\x10\x03\x12\x0e\n" +
 	"\n" +
 	"SDP_ANSWER\x10\x04\x12\x11\n" +
-	"\rICE_CANDIDATE\x10\x05Bf\n" +
+	"\rICE_CANDIDATE\x10\x05\x12\x13\n" +
+	"\x0fFALLBACK_ACTIVE\x10\x06Bf\n" +
 	" com.linuxdeck.client.protocol.v1B\tDeckProtoP\x01Z5github.com/local/linux-deck-daemon/pkg/protocol/v1;v1b\x06proto3"
 
 var (
@@ -3048,7 +3152,7 @@ func file_deck_proto_rawDescGZIP() []byte {
 }
 
 var file_deck_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
-var file_deck_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_deck_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
 var file_deck_proto_goTypes = []any{
 	(SessionStatus)(0),          // 0: deck.v1.SessionStatus
 	(MouseButton)(0),            // 1: deck.v1.MouseButton
@@ -3084,10 +3188,11 @@ var file_deck_proto_goTypes = []any{
 	(*MediaStatusEvent)(nil),    // 31: deck.v1.MediaStatusEvent
 	(*PowerControlCommand)(nil), // 32: deck.v1.PowerControlCommand
 	(*WebRtcSignal)(nil),        // 33: deck.v1.WebRtcSignal
-	nil,                         // 34: deck.v1.MacroExecRequest.EnvEntry
-	nil,                         // 35: deck.v1.DeckButtonSpec.EnvEntry
-	nil,                         // 36: deck.v1.PtyOpenRequest.EnvEntry
-	nil,                         // 37: deck.v1.TelemetrySnapshot.TemperaturesEntry
+	(*ScreenFrame)(nil),         // 34: deck.v1.ScreenFrame
+	nil,                         // 35: deck.v1.MacroExecRequest.EnvEntry
+	nil,                         // 36: deck.v1.DeckButtonSpec.EnvEntry
+	nil,                         // 37: deck.v1.PtyOpenRequest.EnvEntry
+	nil,                         // 38: deck.v1.TelemetrySnapshot.TemperaturesEntry
 }
 var file_deck_proto_depIdxs = []int32{
 	9,  // 0: deck.v1.Envelope.handshake_request:type_name -> deck.v1.HandshakeRequest
@@ -3113,27 +3218,28 @@ var file_deck_proto_depIdxs = []int32{
 	31, // 20: deck.v1.Envelope.media_status_event:type_name -> deck.v1.MediaStatusEvent
 	32, // 21: deck.v1.Envelope.power_control_command:type_name -> deck.v1.PowerControlCommand
 	33, // 22: deck.v1.Envelope.webrtc_signal:type_name -> deck.v1.WebRtcSignal
-	0,  // 23: deck.v1.HandshakeResponse.status:type_name -> deck.v1.SessionStatus
-	1,  // 24: deck.v1.MouseButtonEvent.button:type_name -> deck.v1.MouseButton
-	2,  // 25: deck.v1.MouseButtonEvent.action:type_name -> deck.v1.ButtonAction
-	2,  // 26: deck.v1.KeyEvent.action:type_name -> deck.v1.ButtonAction
-	34, // 27: deck.v1.MacroExecRequest.env:type_name -> deck.v1.MacroExecRequest.EnvEntry
-	3,  // 28: deck.v1.MacroStateSync.state:type_name -> deck.v1.MacroRunState
-	4,  // 29: deck.v1.DeckButtonSpec.type:type_name -> deck.v1.ButtonType
-	35, // 30: deck.v1.DeckButtonSpec.env:type_name -> deck.v1.DeckButtonSpec.EnvEntry
-	22, // 31: deck.v1.DeckPageSpec.buttons:type_name -> deck.v1.DeckButtonSpec
-	23, // 32: deck.v1.DeckProfileSync.pages:type_name -> deck.v1.DeckPageSpec
-	36, // 33: deck.v1.PtyOpenRequest.env:type_name -> deck.v1.PtyOpenRequest.EnvEntry
-	37, // 34: deck.v1.TelemetrySnapshot.temperatures:type_name -> deck.v1.TelemetrySnapshot.TemperaturesEntry
-	31, // 35: deck.v1.TelemetrySnapshot.media_status:type_name -> deck.v1.MediaStatusEvent
-	5,  // 36: deck.v1.MediaControlCommand.command:type_name -> deck.v1.MediaCommandType
-	6,  // 37: deck.v1.PowerControlCommand.action:type_name -> deck.v1.PowerAction
-	7,  // 38: deck.v1.WebRtcSignal.type:type_name -> deck.v1.SignalType
-	39, // [39:39] is the sub-list for method output_type
-	39, // [39:39] is the sub-list for method input_type
-	39, // [39:39] is the sub-list for extension type_name
-	39, // [39:39] is the sub-list for extension extendee
-	0,  // [0:39] is the sub-list for field type_name
+	34, // 23: deck.v1.Envelope.screen_frame:type_name -> deck.v1.ScreenFrame
+	0,  // 24: deck.v1.HandshakeResponse.status:type_name -> deck.v1.SessionStatus
+	1,  // 25: deck.v1.MouseButtonEvent.button:type_name -> deck.v1.MouseButton
+	2,  // 26: deck.v1.MouseButtonEvent.action:type_name -> deck.v1.ButtonAction
+	2,  // 27: deck.v1.KeyEvent.action:type_name -> deck.v1.ButtonAction
+	35, // 28: deck.v1.MacroExecRequest.env:type_name -> deck.v1.MacroExecRequest.EnvEntry
+	3,  // 29: deck.v1.MacroStateSync.state:type_name -> deck.v1.MacroRunState
+	4,  // 30: deck.v1.DeckButtonSpec.type:type_name -> deck.v1.ButtonType
+	36, // 31: deck.v1.DeckButtonSpec.env:type_name -> deck.v1.DeckButtonSpec.EnvEntry
+	22, // 32: deck.v1.DeckPageSpec.buttons:type_name -> deck.v1.DeckButtonSpec
+	23, // 33: deck.v1.DeckProfileSync.pages:type_name -> deck.v1.DeckPageSpec
+	37, // 34: deck.v1.PtyOpenRequest.env:type_name -> deck.v1.PtyOpenRequest.EnvEntry
+	38, // 35: deck.v1.TelemetrySnapshot.temperatures:type_name -> deck.v1.TelemetrySnapshot.TemperaturesEntry
+	31, // 36: deck.v1.TelemetrySnapshot.media_status:type_name -> deck.v1.MediaStatusEvent
+	5,  // 37: deck.v1.MediaControlCommand.command:type_name -> deck.v1.MediaCommandType
+	6,  // 38: deck.v1.PowerControlCommand.action:type_name -> deck.v1.PowerAction
+	7,  // 39: deck.v1.WebRtcSignal.type:type_name -> deck.v1.SignalType
+	40, // [40:40] is the sub-list for method output_type
+	40, // [40:40] is the sub-list for method input_type
+	40, // [40:40] is the sub-list for extension type_name
+	40, // [40:40] is the sub-list for extension extendee
+	0,  // [0:40] is the sub-list for field type_name
 }
 
 func init() { file_deck_proto_init() }
@@ -3165,6 +3271,7 @@ func file_deck_proto_init() {
 		(*Envelope_MediaStatusEvent)(nil),
 		(*Envelope_PowerControlCommand)(nil),
 		(*Envelope_WebrtcSignal)(nil),
+		(*Envelope_ScreenFrame)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -3172,7 +3279,7 @@ func file_deck_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_deck_proto_rawDesc), len(file_deck_proto_rawDesc)),
 			NumEnums:      8,
-			NumMessages:   30,
+			NumMessages:   31,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

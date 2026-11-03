@@ -380,3 +380,81 @@ func (c *closeTrackingMediaSource) Close() error {
 	return c.MediaSource.Close()
 }
 
+func TestSignalingHandler_WatchdogFallbackTrigger(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	testSourceFactory := func(cfg capture.PipelineConfig) capture.MediaSource {
+		cfg.TestSource = true
+		return capture.NewPipeline(cfg)
+	}
+	sigHandler := NewSignalingHandler(t.TempDir(), testSourceFactory, nil)
+	defer sigHandler.CloseAll()
+
+	clientSess := newMemoryClientSession(ctx, "client-fallback-test")
+	defer clientSess.Close()
+
+	router := server.NewRouter(nil)
+	sigHandler.Register(router)
+
+	// Send START_STREAM
+	if err := router.Dispatch(ctx, clientSess, &pb.Envelope{
+		RequestId:   "start-fallback",
+		TimestampMs: time.Now().UnixMilli(),
+		Payload: &pb.Envelope_WebrtcSignal{
+			WebrtcSignal: &pb.WebRtcSignal{
+				Type:        pb.SignalType_START_STREAM,
+				Width:       640,
+				Height:      360,
+				Fps:         30,
+				BitrateKbps: 2000,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("START_STREAM failed: %v", err)
+	}
+
+	// Trigger watchdog timeout manually to simulate WebRTC 3s deadline expiry
+	sigHandler.mu.Lock()
+	wd := sigHandler.watchdogs["client-fallback-test"]
+	fb := sigHandler.fallbacks["client-fallback-test"]
+	sigHandler.mu.Unlock()
+
+	if wd == nil {
+		t.Fatal("expected watchdog to be registered for client")
+	}
+	if fb == nil {
+		t.Fatal("expected fallback streamer to be registered for client")
+	}
+
+	// Simulate watchdog timeout firing
+	wd.TriggerTimeout()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if !fb.IsRunning() {
+		t.Fatal("fallback streamer should be running after timeout")
+	}
+
+	// Verify client received a ScreenFrame envelope
+	var receivedScreenFrame bool
+	timeout := time.After(200 * time.Millisecond)
+drain:
+	for {
+		select {
+		case env := <-clientSess.outCh:
+			if env.GetScreenFrame() != nil {
+				receivedScreenFrame = true
+				break drain
+			}
+		case <-timeout:
+			break drain
+		}
+	}
+
+	if !receivedScreenFrame {
+		t.Fatal("expected client to receive at least one ScreenFrame envelope upon fallback activation")
+	}
+}
+
+

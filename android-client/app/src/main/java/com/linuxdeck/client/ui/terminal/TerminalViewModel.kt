@@ -6,6 +6,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.google.protobuf.ByteString
+import com.linuxdeck.client.fixes.SafeTerminalEngine
+import com.linuxdeck.client.fixes.TerminalLineRingBuffer
 import com.linuxdeck.client.network.ConnectionState
 import com.linuxdeck.client.network.DeckConnectionService
 import com.linuxdeck.client.network.DeckSessionClient
@@ -180,7 +182,7 @@ data class TerminalScreenSnapshot(
 class AnsiTerminalBuffer(
     initialCols: Int = 80,
     initialRows: Int = 24,
-    private val maxScrollbackLines: Int = 600,
+    val maxScrollbackLines: Int = 1000,
 ) {
     private enum class ParserState {
         GROUND,
@@ -198,7 +200,7 @@ class AnsiTerminalBuffer(
 
     private var primaryGrid: Array<Array<TerminalCell>> = createEmptyGrid(rows, cols)
     private var altGrid: Array<Array<TerminalCell>> = createEmptyGrid(rows, cols)
-    private val scrollback = ArrayDeque<List<TerminalCell>>(maxScrollbackLines)
+    val scrollback = TerminalLineRingBuffer(maxScrollbackLines)
 
     private var usingAltScreen: Boolean = false
     private val activeGrid: Array<Array<TerminalCell>>
@@ -320,7 +322,7 @@ class AnsiTerminalBuffer(
             for (i in 0 until rows) {
                 val globalIdx = startIdx + i
                 if (globalIdx < scrollback.size) {
-                    val histRow = scrollback[globalIdx]
+                    val histRow = scrollback.get(globalIdx) ?: emptyList()
                     val padded = ArrayList<TerminalCell>(cols)
                     for (c in 0 until cols) {
                         padded.add(histRow.getOrElse(c) { TerminalCell.BLANK })
@@ -756,10 +758,7 @@ class AnsiTerminalBuffer(
     private fun scrollRegionUp(top: Int, bottom: Int, recordScrollback: Boolean) {
         val grid = activeGrid
         if (recordScrollback) {
-            if (scrollback.size >= maxScrollbackLines) {
-                scrollback.removeFirst()
-            }
-            scrollback.addLast(grid[top].toList())
+            scrollback.add(grid[top].toList())
         }
         for (r in top until bottom) {
             grid[r] = grid[r + 1]
@@ -921,10 +920,16 @@ class TerminalViewModel(
 
     val connectionState: StateFlow<ConnectionState> = transport.connectionState
 
-    private val terminalBuffer = AnsiTerminalBuffer(initialCols = 80, initialRows = 24)
+    val terminalEngine = SafeTerminalEngine(
+        initialCols = 80,
+        initialRows = 24,
+        maxScrollbackLines = 1000,
+        computeDispatcher = computeDispatcher,
+    )
+    val terminalBuffer: AnsiTerminalBuffer get() = terminalEngine.terminalBuffer
 
     private val _uiState = MutableStateFlow(
-        TerminalUiState(screen = terminalBuffer.snapshot()),
+        TerminalUiState(screen = terminalEngine.snapshot()),
     )
     val uiState: StateFlow<TerminalUiState> = _uiState.asStateFlow()
 
@@ -934,6 +939,19 @@ class TerminalViewModel(
     private var pendingAutoOpenOnConnect: Boolean = true
 
     init {
+        terminalEngine.startProcessing(
+            scope = viewModelScope,
+            scrollOffsetProvider = { _uiState.value.scrollOffsetLines },
+        ) { snapshot ->
+            _uiState.update { current ->
+                current.copy(
+                    isSessionOpen = true,
+                    screen = snapshot,
+                    exitBanner = null,
+                )
+            }
+        }
+
         viewModelScope.launch {
             transport.incomingEnvelopes.collect { envelope ->
                 handleIncomingEnvelope(envelope)
@@ -959,20 +977,9 @@ class TerminalViewModel(
                 val ev = envelope.ptyDataEvent
                 if (ev.sessionId == activeSessionId && !ev.data.isEmpty) {
                     val bytes = ev.data.toByteArray()
-                    val scrollOffset = _uiState.value.scrollOffsetLines
-                    // Isolate ANSI parser & snapshot execution in Dispatchers.Default (CPU-bound)
-                    // so large outputs (e.g. cat/find/htop) never block the UI thread or cause frame drops.
-                    val snapshot = withContext(computeDispatcher) {
-                        terminalBuffer.feedBytes(bytes)
-                        terminalBuffer.snapshot(scrollOffset)
-                    }
-                    _uiState.update { current ->
-                        current.copy(
-                            isSessionOpen = true,
-                            screen = snapshot,
-                            exitBanner = null,
-                        )
-                    }
+                    // FIX-06: Offload burst ANSI processing to Dispatchers.Default and throttle snapshot
+                    // dispatch to max 30 FPS (~33ms) via SafeTerminalEngine conflate flow to eliminate UI lockups / ANRs.
+                    terminalEngine.feedBytesThrottled(bytes)
                 }
             }
 
@@ -1055,6 +1062,28 @@ class TerminalViewModel(
                     )
                 }
             }
+        }
+    }
+
+    /**
+     * FIX-06: Dispatches PtyReady handshake to the Linux daemon, unblocking the sliding window
+     * and signaling that Android UI has rendered and is ready to ingest PTY stdout streams.
+     */
+    fun sendPtyReady() {
+        val sid = activeSessionId
+        if (sid.isEmpty()) return
+        viewModelScope.launch(ioDispatcher) {
+            val readyEnv = Envelope.newBuilder()
+                .setRequestId("pty-ready-$sid")
+                .setTimestampMs(System.currentTimeMillis())
+                .setPtyDataEvent(
+                    PtyDataEvent.newBuilder()
+                        .setSessionId(sid)
+                        .setData(ByteString.copyFromUtf8(SafeTerminalEngine.PTY_READY_TOKEN))
+                        .build(),
+                )
+                .build()
+            transport.sendEnvelope(readyEnv)
         }
     }
 

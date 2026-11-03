@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/local/linux-deck-daemon/fixes"
 	"github.com/local/linux-deck-daemon/internal/server"
 	pb "github.com/local/linux-deck-daemon/pkg/protocol/v1"
 )
@@ -47,6 +48,7 @@ type ptySession struct {
 	mu        sync.Mutex
 	rows      uint16
 	cols      uint16
+	throttle  *fixes.ThrottledPtyController
 }
 
 // Manager manages interactive PTY shell sessions across connected clients.
@@ -177,6 +179,7 @@ func (m *Manager) HandleOpen(ctx context.Context, client server.ClientSession, e
 		doneCh:    make(chan struct{}),
 		rows:      rows,
 		cols:      cols,
+		throttle:  fixes.NewThrottledPtyController(fixes.DefaultMaxWindowBytes),
 	}
 	m.sessions[sessionID] = sess
 	m.mu.Unlock()
@@ -220,7 +223,8 @@ func (m *Manager) HandleOpen(ctx context.Context, client server.ClientSession, e
 	return nil
 }
 
-// HandleData writes raw bytes from the client into the PTY master file descriptor.
+// HandleData writes raw bytes from the client into the PTY master file descriptor,
+// or intercepts the PtyReady handshake and flow control acknowledgments.
 func (m *Manager) HandleData(_ context.Context, _ server.ClientSession, env *pb.Envelope) error {
 	ev := env.GetPtyDataEvent()
 	if ev == nil {
@@ -233,6 +237,23 @@ func (m *Manager) HandleData(_ context.Context, _ server.ClientSession, env *pb.
 	sess, ok := m.getSession(ev.SessionId)
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrSessionNotFound, ev.SessionId)
+	}
+
+	// Intercept PtyReady handshake from the client
+	if fixes.IsPtyReadyPayload(ev.Data) {
+		if sess.throttle != nil {
+			sess.throttle.MarkReady()
+			sess.throttle.ResetWindow()
+		}
+		m.logger.Debug("pty client signaled readiness", "session_id", ev.SessionId)
+		return nil
+	}
+
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+
+	if sess.ptmx == nil {
+		return errors.New("pty manager: session master closed")
 	}
 
 	if _, err := sess.ptmx.Write(ev.Data); err != nil {
@@ -370,6 +391,11 @@ func (m *Manager) readLoop(sess *ptySession) {
 	flushTimer.Stop()
 	flushTimerActive := false
 
+	// Flow control: wait for client UI mount and PtyReady handshake (or timeout after 350ms)
+	if sess.throttle != nil {
+		sess.throttle.WaitReady(context.Background(), 350*time.Millisecond)
+	}
+
 	flush := func() {
 		if len(pending) == 0 || sess.client == nil {
 			return
@@ -377,6 +403,11 @@ func (m *Manager) readLoop(sess *ptySession) {
 		chunk := make([]byte, len(pending))
 		copy(chunk, pending)
 		pending = pending[:0]
+
+		if sess.throttle != nil {
+			sess.throttle.RecordSent(len(chunk))
+		}
+
 		_ = sess.client.Send(&pb.Envelope{
 			RequestId:   fmt.Sprintf("pty-data-%d", time.Now().UnixNano()),
 			TimestampMs: time.Now().UnixMilli(),
@@ -397,6 +428,12 @@ func (m *Manager) readLoop(sess *ptySession) {
 
 	fd := sess.fd
 	for {
+		// Throttling: if sliding window is full, yield briefly to let client UI catch up
+		if sess.throttle != nil && sess.throttle.ShouldThrottle() {
+			time.Sleep(16 * time.Millisecond)
+			sess.throttle.AcknowledgeBytes(16 * 1024)
+		}
+
 		// Non-blocking read directly via syscall
 		n, err := syscall.Read(fd, buf)
 		if n > 0 {

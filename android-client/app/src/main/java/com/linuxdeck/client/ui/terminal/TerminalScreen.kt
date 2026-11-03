@@ -168,6 +168,7 @@ fun TerminalScreen(
     }
 
     LaunchedEffect(Unit) {
+        terminalViewModel.sendPtyReady()
         focusRequester.requestFocus()
     }
 

@@ -196,7 +196,6 @@ fun RemoteDesktopScreen(
             webRtcManager.detachAndReleaseRenderer(surfaceRendererRef)
             surfaceRendererRef = null
             webRtcManager.stopStream(sendStopSignal = true)
-            webRtcManager.release()
         }
     }
 

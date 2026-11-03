@@ -136,3 +136,59 @@ func TestAnnexBNALParserAndValidation(t *testing.T) {
 	}
 }
 
+func TestCandidateH264EncodersOrder(t *testing.T) {
+	candidates := CandidateH264Encoders(4000)
+	if len(candidates) == 0 {
+		t.Skip("no H.264 encoders installed on host system")
+	}
+
+	// Verify that if x264enc is present, it's configured for zerolatency & ultrafast
+	for _, cand := range candidates {
+		if cand.Kind == EncoderX264 {
+			joined := ""
+			for _, a := range cand.Args {
+				joined += a + " "
+			}
+			if !containsSubstring(joined, "tune=zerolatency") || !containsSubstring(joined, "speed-preset=ultrafast") {
+				t.Errorf("x264enc args missing low-latency tuning: %s", joined)
+			}
+		}
+	}
+}
+
+func TestPortalSessionStateMachine_CloseIdempotent(t *testing.T) {
+	sess := &PipeWirePortalSession{
+		state: PortalStateActive,
+	}
+
+	if sess.State() != PortalStateActive {
+		t.Fatalf("expected state %v, got %v", PortalStateActive, sess.State())
+	}
+
+	// First close
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if sess.State() != PortalStateClosed {
+		t.Fatalf("expected state %v after Close, got %v", PortalStateClosed, sess.State())
+	}
+
+	// Second close must be safe and idempotent
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Second Close failed: %v", err)
+	}
+}
+
+func containsSubstring(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsSub(s, sub))
+}
+
+func containsSub(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+

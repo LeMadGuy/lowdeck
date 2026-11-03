@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	godbus "github.com/godbus/dbus/v5"
@@ -31,6 +32,21 @@ const (
 	PersistModePermanent uint32 = 2
 )
 
+// PortalStateMachineState tracks the lifecycle stages of the Wayland ScreenCast portal handshake.
+type PortalStateMachineState string
+
+const (
+	PortalStateUninitialized   PortalStateMachineState = "UNINITIALIZED"
+	PortalStateConnecting      PortalStateMachineState = "CONNECTING"
+	PortalStateSessionCreated  PortalStateMachineState = "SESSION_CREATED"
+	PortalStateSourcesSelected PortalStateMachineState = "SOURCES_SELECTED"
+	PortalStateStarted         PortalStateMachineState = "STARTED"
+	PortalStatePipeWireOpened  PortalStateMachineState = "PIPEWIRE_OPENED"
+	PortalStateActive          PortalStateMachineState = "ACTIVE"
+	PortalStateFailed          PortalStateMachineState = "FAILED"
+	PortalStateClosed          PortalStateMachineState = "CLOSED"
+)
+
 // PipeWirePortalSession holds an active Wayland ScreenCast portal session and PipeWire remote FD.
 type PipeWirePortalSession struct {
 	NodeID        uint32
@@ -38,6 +54,18 @@ type PipeWirePortalSession struct {
 	SessionHandle godbus.ObjectPath
 	RestoreToken  string
 	conn          *godbus.Conn
+	state         PortalStateMachineState
+	closeOnce     sync.Once
+	logger        *slog.Logger
+	configDir     string
+}
+
+// State returns the current portal lifecycle state.
+func (s *PipeWirePortalSession) State() PortalStateMachineState {
+	if s == nil {
+		return PortalStateClosed
+	}
+	return s.state
 }
 
 // Close releases the PipeWire file descriptor, closes the portal session, and disconnects D-Bus.
@@ -45,18 +73,22 @@ func (s *PipeWirePortalSession) Close() error {
 	if s == nil {
 		return nil
 	}
-	if s.PipeWireFile != nil {
-		_ = s.PipeWireFile.Close()
-		s.PipeWireFile = nil
-	}
-	if s.conn != nil {
-		if s.SessionHandle != "" {
-			obj := s.conn.Object(portalDest, s.SessionHandle)
-			_ = obj.Call(sessionInterface+".Close", 0).Err
+	s.closeOnce.Do(func() {
+		s.state = PortalStateClosed
+		if s.PipeWireFile != nil {
+			_ = s.PipeWireFile.Close()
+			s.PipeWireFile = nil
 		}
-		_ = s.conn.Close()
-		s.conn = nil
-	}
+		if s.conn != nil {
+			if s.SessionHandle != "" {
+				obj := s.conn.Object(portalDest, s.SessionHandle)
+				_ = obj.Call(sessionInterface+".Close", 0).Err
+				s.SessionHandle = ""
+			}
+			_ = s.conn.Close()
+			s.conn = nil
+		}
+	})
 	return nil
 }
 
@@ -85,10 +117,18 @@ func NegotiateWaylandScreenCast(ctx context.Context, configDir string, logger *s
 		return nil, fmt.Errorf("portal screencast connect session bus: %w", err)
 	}
 
-	cleanupConn := true
+	sess := &PipeWirePortalSession{
+		conn:      conn,
+		state:     PortalStateConnecting,
+		logger:    logger,
+		configDir: configDir,
+	}
+
+	var success bool
 	defer func() {
-		if cleanupConn {
-			_ = conn.Close()
+		if !success {
+			sess.state = PortalStateFailed
+			_ = sess.Close()
 		}
 	}()
 
@@ -114,27 +154,45 @@ func NegotiateWaylandScreenCast(ctx context.Context, configDir string, logger *s
 	if err != nil {
 		return nil, err
 	}
+	sess.SessionHandle = sessionHandle
+	sess.state = PortalStateSessionCreated
 
 	// Step 2: SelectSources (Monitor, embedded cursor, persist_mode = 2 + optional restore_token)
 	selectToken := randomPortalToken("deck_sel")
 	savedRestoreToken := loadRestoreToken(configDir)
-	_, err = callPortalRequest(ctx, conn, senderName, selectToken, func() error {
-		opts := map[string]godbus.Variant{
-			"handle_token": godbus.MakeVariant(selectToken),
-			"types":        godbus.MakeVariant(SourceTypeMonitor),
-			"multiple":     godbus.MakeVariant(false),
-			"cursor_mode":  godbus.MakeVariant(CursorModeEmbedded),
-			"persist_mode": godbus.MakeVariant(PersistModePermanent),
-		}
-		if savedRestoreToken != "" {
-			opts["restore_token"] = godbus.MakeVariant(savedRestoreToken)
-		}
-		var reqPath godbus.ObjectPath
-		return portalObj.CallWithContext(ctx, screenCastInterface+".SelectSources", 0, sessionHandle, opts).Store(&reqPath)
-	})
+
+	selectSourcesFn := func(useRestoreToken string) (map[string]godbus.Variant, error) {
+		return callPortalRequest(ctx, conn, senderName, selectToken, func() error {
+			opts := map[string]godbus.Variant{
+				"handle_token": godbus.MakeVariant(selectToken),
+				"types":        godbus.MakeVariant(SourceTypeMonitor),
+				"multiple":     godbus.MakeVariant(false),
+				"cursor_mode":  godbus.MakeVariant(CursorModeEmbedded),
+				"persist_mode": godbus.MakeVariant(PersistModePermanent),
+			}
+			if useRestoreToken != "" {
+				opts["restore_token"] = godbus.MakeVariant(useRestoreToken)
+			}
+			var reqPath godbus.ObjectPath
+			return portalObj.CallWithContext(ctx, screenCastInterface+".SelectSources", 0, sessionHandle, opts).Store(&reqPath)
+		})
+	}
+
+	_, err = selectSourcesFn(savedRestoreToken)
+	if err != nil && savedRestoreToken != "" {
+		// If saved restore token was rejected or expired, clear it and retry prompt cleanly
+		logger.Warn("saved screencast restore_token rejected; clearing and retrying interactive source selection", "err", err)
+		clearRestoreToken(configDir)
+		selectToken = randomPortalToken("deck_sel_retry")
+		_, err = selectSourcesFn("")
+	}
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "denied") || strings.Contains(strings.ToLower(err.Error()), "cancelled") {
+			clearRestoreToken(configDir)
+		}
 		return nil, fmt.Errorf("portal SelectSources: %w", err)
 	}
+	sess.state = PortalStateSourcesSelected
 
 	// Step 3: Start
 	startToken := randomPortalToken("deck_start")
@@ -148,11 +206,13 @@ func NegotiateWaylandScreenCast(ctx context.Context, configDir string, logger *s
 	if err != nil {
 		return nil, fmt.Errorf("portal Start: %w", err)
 	}
+	sess.state = PortalStateStarted
 
 	nodeID, err := extractPipeWireNodeID(startResults)
 	if err != nil {
 		return nil, err
 	}
+	sess.NodeID = nodeID
 
 	var newRestoreToken string
 	if tokVar, ok := startResults["restore_token"]; ok {
@@ -161,6 +221,7 @@ func NegotiateWaylandScreenCast(ctx context.Context, configDir string, logger *s
 			saveRestoreToken(configDir, tokStr)
 		}
 	}
+	sess.RestoreToken = newRestoreToken
 
 	// Step 4: OpenPipeWireRemote
 	var pwUnixFD godbus.UnixFD
@@ -179,20 +240,17 @@ func NegotiateWaylandScreenCast(ctx context.Context, configDir string, logger *s
 		_ = syscall.Close(dupFD)
 		return nil, errors.New("portal create os.File from pipewire fd failed")
 	}
+	sess.PipeWireFile = pwFile
+	sess.state = PortalStatePipeWireOpened
 
-	cleanupConn = false
+	success = true
+	sess.state = PortalStateActive
 	logger.Info("wayland portal screencast negotiated",
 		"pipewire_node_id", nodeID,
 		"restored", savedRestoreToken != "",
 	)
 
-	return &PipeWirePortalSession{
-		NodeID:        nodeID,
-		PipeWireFile:  pwFile,
-		SessionHandle: sessionHandle,
-		RestoreToken:  newRestoreToken,
-		conn:          conn,
-	}, nil
+	return sess, nil
 }
 
 func callPortalRequest(
@@ -310,4 +368,11 @@ func saveRestoreToken(configDir, token string) {
 	}
 	_ = os.MkdirAll(configDir, auth.DirPerm)
 	_ = os.WriteFile(filepath.Join(configDir, "screencast_restore_token"), []byte(token), auth.FilePerm)
+}
+
+func clearRestoreToken(configDir string) {
+	if configDir == "" {
+		return
+	}
+	_ = os.Remove(filepath.Join(configDir, "screencast_restore_token"))
 }

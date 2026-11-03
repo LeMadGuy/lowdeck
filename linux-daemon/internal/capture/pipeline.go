@@ -132,10 +132,65 @@ func (p *GStreamerPipeline) EncoderName() string {
 	return string(p.encoderKind)
 }
 
-// DetectH264Encoder inspects available GStreamer plugins in strict priority order:
+// EncoderCandidate represents an H.264 encoder candidate with tuned flags.
+type EncoderCandidate struct {
+	Kind H264EncoderKind
+	Args []string
+}
+
+// CandidateH264Encoders returns supported H.264 encoders in priority order:
 // 1. AMD/Intel VA-API (vaapih264enc)
 // 2. NVIDIA NVENC (nvh264enc)
-// 3. Software CPU fallback (x264enc)
+// 3. Software CPU fallback (x264enc tune=zerolatency speed-preset=ultrafast)
+func CandidateH264Encoders(bitrateKbps uint32) []EncoderCandidate {
+	var candidates []EncoderCandidate
+
+	if hasGstElement("vaapih264enc") {
+		candidates = append(candidates, EncoderCandidate{
+			Kind: EncoderVAAPI,
+			Args: []string{
+				"vaapih264enc",
+				"rate-control=cbr",
+				"tune=low-power",
+				"keyframe-period=60",
+				"max-bframes=0",
+				fmt.Sprintf("bitrate=%d", bitrateKbps),
+			},
+		})
+	}
+
+	if hasGstElement("nvh264enc") {
+		candidates = append(candidates, EncoderCandidate{
+			Kind: EncoderNVENC,
+			Args: []string{
+				"nvh264enc",
+				"preset=low-latency-hq",
+				"rc-mode=cbr",
+				"zerolatency=true",
+				"bframes=0",
+				fmt.Sprintf("bitrate=%d", bitrateKbps),
+			},
+		})
+	}
+
+	if hasGstElement("x264enc") {
+		candidates = append(candidates, EncoderCandidate{
+			Kind: EncoderX264,
+			Args: []string{
+				"x264enc",
+				"tune=zerolatency",
+				"speed-preset=ultrafast",
+				"bframes=0",
+				"key-int-max=60",
+				fmt.Sprintf("bitrate=%d", bitrateKbps),
+			},
+		})
+	}
+
+	return candidates
+}
+
+// DetectH264Encoder inspects available GStreamer plugins in strict priority order.
 func DetectH264Encoder(bitrateKbps uint32) (H264EncoderKind, []string, error) {
 	if _, err := exec.LookPath("gst-inspect-1.0"); err != nil {
 		return "", nil, fmt.Errorf("gst-inspect-1.0 not found: %w", err)
@@ -144,40 +199,9 @@ func DetectH264Encoder(bitrateKbps uint32) (H264EncoderKind, []string, error) {
 		return "", nil, fmt.Errorf("gst-launch-1.0 not found: %w", err)
 	}
 
-	if hasGstElement("vaapih264enc") {
-		args := []string{
-			"vaapih264enc",
-			"rate-control=cbr",
-			"tune=low-power",
-			"keyframe-period=60",
-			"max-bframes=0",
-			fmt.Sprintf("bitrate=%d", bitrateKbps),
-		}
-		return EncoderVAAPI, args, nil
-	}
-
-	if hasGstElement("nvh264enc") {
-		args := []string{
-			"nvh264enc",
-			"preset=low-latency-hq",
-			"rc-mode=cbr",
-			"zerolatency=true",
-			"bframes=0",
-			fmt.Sprintf("bitrate=%d", bitrateKbps),
-		}
-		return EncoderNVENC, args, nil
-	}
-
-	if hasGstElement("x264enc") {
-		args := []string{
-			"x264enc",
-			"tune=zerolatency",
-			"speed-preset=ultrafast",
-			"bframes=0",
-			"key-int-max=60",
-			fmt.Sprintf("bitrate=%d", bitrateKbps),
-		}
-		return EncoderX264, args, nil
+	candidates := CandidateH264Encoders(bitrateKbps)
+	if len(candidates) > 0 {
+		return candidates[0].Kind, candidates[0].Args, nil
 	}
 
 	return "", nil, errors.New("capture: no supported H.264 GStreamer encoder found (vaapih264enc, nvh264enc, x264enc)")
@@ -199,10 +223,10 @@ func (p *GStreamerPipeline) Start(ctx context.Context) error {
 	p.started = true
 	p.mu.Unlock()
 
-	encKind, encArgs, encErr := DetectH264Encoder(p.cfg.BitrateKbps)
-	if encErr != nil {
+	candidates := CandidateH264Encoders(p.cfg.BitrateKbps)
+	if len(candidates) == 0 {
 		if p.cfg.TestSource {
-			p.logger.Warn("GStreamer unavailable in test mode; using built-in synthetic H.264/Opus generator", "err", encErr)
+			p.logger.Warn("GStreamer unavailable in test mode; using built-in synthetic H.264/Opus generator")
 			p.mu.Lock()
 			p.encoderKind = EncoderFallback
 			p.mu.Unlock()
@@ -210,14 +234,18 @@ func (p *GStreamerPipeline) Start(ctx context.Context) error {
 			return nil
 		}
 		cancel()
-		return encErr
+		return errors.New("capture: no supported H.264 GStreamer encoder found (vaapih264enc, nvh264enc, x264enc)")
 	}
 
-	p.mu.Lock()
-	p.encoderKind = encKind
-	p.mu.Unlock()
-
-	if err := p.startGStreamerVideo(runCtx, encKind, encArgs); err != nil {
+	if err := p.startGStreamerVideoWithFallback(runCtx, candidates); err != nil {
+		if p.cfg.TestSource {
+			p.logger.Warn("GStreamer video failed; falling back to synthetic generator in test mode", "err", err)
+			p.mu.Lock()
+			p.encoderKind = EncoderFallback
+			p.mu.Unlock()
+			p.startPureGoSyntheticLoops(runCtx)
+			return nil
+		}
 		cancel()
 		return err
 	}
@@ -272,7 +300,7 @@ func (p *GStreamerPipeline) Close() error {
 	return nil
 }
 
-func (p *GStreamerPipeline) startGStreamerVideo(ctx context.Context, encKind H264EncoderKind, encArgs []string) error {
+func (p *GStreamerPipeline) startGStreamerVideoWithFallback(ctx context.Context, candidates []EncoderCandidate) error {
 	var (
 		srcArgs    []string
 		extraFiles []*os.File
@@ -318,49 +346,119 @@ func (p *GStreamerPipeline) startGStreamerVideo(ctx context.Context, encKind H26
 		return errors.New("capture: no desktop video capture element found (pipewiresrc or ximagesrc)")
 	}
 
-	args := []string{"-q"}
-	args = append(args, srcArgs...)
-	args = append(args, "!", "videoconvert", "!")
-	args = append(args, encArgs...)
-	args = append(args,
-		"!", "video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline",
-		"!", "fdsink", "fd=1",
-	)
-
-	cmd := exec.CommandContext(ctx, "gst-launch-1.0", args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.ExtraFiles = extraFiles
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("capture video stdout pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("capture start gst-launch-1.0 (%s): %w", encKind, err)
-	}
-
-	p.mu.Lock()
-	p.videoCmd = cmd
-	p.mu.Unlock()
-
-	p.logger.Info("started GStreamer H.264 video pipeline",
-		"encoder", encKind,
-		"test_source", p.cfg.TestSource,
-		"width", p.cfg.Width,
-		"height", p.cfg.Height,
-		"fps", p.cfg.FPS,
-	)
-
 	frameDuration := time.Second / time.Duration(p.cfg.FPS)
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
-		p.readAnnexBH264Stream(ctx, stdoutPipe, frameDuration)
-		_ = cmd.Wait()
-	}()
+	var lastErr error
 
-	return nil
+	for i, cand := range candidates {
+		args := []string{"-q"}
+		args = append(args, srcArgs...)
+		args = append(args, "!", "videoconvert", "!")
+		args = append(args, cand.Args...)
+		args = append(args,
+			"!", "video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline",
+			"!", "fdsink", "fd=1",
+		)
+
+		cmd := exec.CommandContext(ctx, "gst-launch-1.0", args...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.ExtraFiles = extraFiles
+
+		stdoutPipe, err := cmd.StdoutPipe()
+		if err != nil {
+			lastErr = fmt.Errorf("capture video stdout pipe (%s): %w", cand.Kind, err)
+			continue
+		}
+
+		if err := cmd.Start(); err != nil {
+			p.logger.Warn("failed to start GStreamer encoder candidate",
+				"encoder", cand.Kind,
+				"err", err,
+			)
+			lastErr = err
+			continue
+		}
+
+		// Verify that the process starts cleanly without immediate GPU/VA-API initialization crash
+		initialBuf := make([]byte, 4096)
+		readDone := make(chan int, 1)
+		readErrCh := make(chan error, 1)
+
+		go func() {
+			n, rErr := stdoutPipe.Read(initialBuf)
+			if rErr != nil {
+				readErrCh <- rErr
+				return
+			}
+			readDone <- n
+		}()
+
+		var (
+			firstChunk []byte
+			candFailed bool
+		)
+
+		select {
+		case n := <-readDone:
+			firstChunk = make([]byte, n)
+			copy(firstChunk, initialBuf[:n])
+		case rErr := <-readErrCh:
+			p.logger.Warn("GStreamer encoder exited prematurely before first frame",
+				"encoder", cand.Kind,
+				"err", rErr,
+			)
+			killProcessGroup(cmd)
+			_ = cmd.Wait()
+			lastErr = fmt.Errorf("encoder %s exited before first frame: %w", cand.Kind, rErr)
+			candFailed = true
+		case <-time.After(1200 * time.Millisecond):
+			// Process is alive after 1.2s; accept candidate
+		case <-ctx.Done():
+			killProcessGroup(cmd)
+			return ctx.Err()
+		}
+
+		if candFailed {
+			if i < len(candidates)-1 {
+				p.logger.Info("attempting fallback to next H.264 encoder candidate",
+					"failed_encoder", cand.Kind,
+					"next_encoder", candidates[i+1].Kind,
+				)
+				continue
+			}
+			return lastErr
+		}
+
+		p.mu.Lock()
+		p.videoCmd = cmd
+		p.encoderKind = cand.Kind
+		p.mu.Unlock()
+
+		p.logger.Info("started GStreamer H.264 video pipeline",
+			"encoder", cand.Kind,
+			"test_source", p.cfg.TestSource,
+			"width", p.cfg.Width,
+			"height", p.cfg.Height,
+			"fps", p.cfg.FPS,
+		)
+
+		p.wg.Add(1)
+		go func(initData []byte, out io.Reader) {
+			defer p.wg.Done()
+			var reader io.Reader = out
+			if len(initData) > 0 {
+				reader = io.MultiReader(bytes.NewReader(initData), out)
+			}
+			p.readAnnexBH264Stream(ctx, reader, frameDuration)
+			_ = cmd.Wait()
+		}(firstChunk, stdoutPipe)
+
+		return nil
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("all H.264 encoder candidates failed: %w", lastErr)
+	}
+	return errors.New("capture: failed to start any H.264 video encoder")
 }
 
 func (p *GStreamerPipeline) HeightOrDefault() uint32 {

@@ -193,10 +193,16 @@ class WebRtcClientManager(
 
     init {
         ensureFactoryInitialized()
-        signalingCollectorJob = scope.launch {
-            transport.incomingEnvelopes.collect { envelope ->
-                if (envelope.payloadCase == Envelope.PayloadCase.WEBRTC_SIGNAL) {
-                    handleIncomingSignal(envelope.webrtcSignal)
+        ensureSignalingCollectorActive()
+    }
+
+    private fun ensureSignalingCollectorActive() {
+        if (signalingCollectorJob == null || signalingCollectorJob?.isActive != true) {
+            signalingCollectorJob = scope.launch {
+                transport.incomingEnvelopes.collect { envelope ->
+                    if (envelope.payloadCase == Envelope.PayloadCase.WEBRTC_SIGNAL) {
+                        handleIncomingSignal(envelope.webrtcSignal)
+                    }
                 }
             }
         }
@@ -207,7 +213,7 @@ class WebRtcClientManager(
 
     private fun ensureFactoryInitialized() {
         synchronized(lock) {
-            if (released.get() || peerConnectionFactory != null) return
+            if (peerConnectionFactory != null) return
 
             initializeGlobalPeerConnectionFactory(appContext)
 
@@ -312,12 +318,14 @@ class WebRtcClientManager(
      * `WebRtcSignal{START_STREAM}` on [ioDispatcher].
      */
     fun startStream(config: RemoteStreamConfig = RemoteStreamConfig()) {
-        if (released.get()) return
+        if (released.get()) {
+            released.set(false)
+        }
+        ensureSignalingCollectorActive()
         scope.launch {
             closePeerConnectionLocked()
 
             synchronized(lock) {
-                if (released.get()) return@launch
                 ensureFactoryInitialized()
                 val factory = peerConnectionFactory ?: run {
                     _streamState.value = StreamConnectionState.Failed("Falha ao inicializar PeerConnectionFactory")

@@ -27,17 +27,36 @@ const (
 // ErrNoMediaPlayers is returned when no active org.mpris.MediaPlayer2.* destination exists on the SessionBus.
 var ErrNoMediaPlayers = errors.New("dbus mpris: no active MPRIS2 media players found")
 
-// MediaController interacts with MPRIS2 media players over the D-Bus SessionBus.
+// MediaController interacts with MPRIS2 media players over the D-Bus SessionBus
+// and delegates system audio volume/mute controls to SystemAudio (wpctl / pactl).
 type MediaController struct {
 	logger *slog.Logger
+	audio  SystemAudio
 }
 
-// NewMediaController creates a new MPRIS2 D-Bus media controller.
+// NewMediaController creates a new MPRIS2 D-Bus media controller with default system audio control.
 func NewMediaController(logger *slog.Logger) *MediaController {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &MediaController{logger: logger}
+	return &MediaController{
+		logger: logger,
+		audio:  NewSystemAudio(logger),
+	}
+}
+
+// NewMediaControllerWithAudio creates a new MediaController with a custom SystemAudio provider (useful for testing).
+func NewMediaControllerWithAudio(logger *slog.Logger, audio SystemAudio) *MediaController {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if audio == nil {
+		audio = NewSystemAudio(logger)
+	}
+	return &MediaController{
+		logger: logger,
+		audio:  audio,
+	}
 }
 
 // Register binds the MediaControlCommand handler on router.
@@ -88,28 +107,87 @@ func (m *MediaController) ListPlayers(ctx context.Context) ([]string, error) {
 	return listPlayersOnConn(ctx, conn)
 }
 
-// GetStatus queries Metadata and PlaybackStatus from the specified (or first active) MPRIS2 media player.
+// GetStatus queries Metadata and PlaybackStatus from the specified (or first active) MPRIS2 media player,
+// enriched with current system audio volume and mute state.
 func (m *MediaController) GetStatus(ctx context.Context, preferredPlayer string) (*pb.MediaStatusEvent, error) {
+	var status *pb.MediaStatusEvent
 	conn, err := connectSessionBus()
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	dest, err := selectPlayerDest(ctx, conn, preferredPlayer)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		defer conn.Close()
+		if dest, err := selectPlayerDest(ctx, conn, preferredPlayer); err == nil {
+			status, _ = readPlayerStatus(ctx, conn, dest)
+		}
 	}
 
-	return readPlayerStatus(ctx, conn, dest)
+	if status == nil {
+		status = &pb.MediaStatusEvent{}
+	}
+
+	if m.audio != nil {
+		if vol, isMuted, aErr := m.audio.GetVolume(ctx); aErr == nil {
+			if isMuted {
+				status.Volume = 0.0
+			} else {
+				status.Volume = vol
+			}
+		}
+	}
+
+	return status, nil
 }
 
-// ExecuteCommand dispatches PlayPause, Play, Pause, Next, Previous, Stop, or Volume commands via MPRIS2.
+// ExecuteCommand dispatches VolumeUp, VolumeDown, Mute via system audio (wpctl with pactl fallback),
+// and PlayPause, Play, Pause, Next, Previous, Stop via MPRIS2 over D-Bus.
 func (m *MediaController) ExecuteCommand(ctx context.Context, cmd *pb.MediaControlCommand) (*pb.MediaStatusEvent, error) {
 	if cmd == nil {
 		return nil, errors.New("dbus mpris: nil MediaControlCommand")
 	}
 
+	switch cmd.Command {
+	case pb.MediaCommandType_VOLUME_UP:
+		if m.audio != nil {
+			if err := m.audio.VolumeUp(ctx, 0.05); err != nil {
+				return nil, fmt.Errorf("system audio volume up: %w", err)
+			}
+		}
+		return m.GetStatus(ctx, cmd.Player)
+
+	case pb.MediaCommandType_VOLUME_DOWN:
+		if m.audio != nil {
+			if err := m.audio.VolumeDown(ctx, 0.05); err != nil {
+				return nil, fmt.Errorf("system audio volume down: %w", err)
+			}
+		}
+		return m.GetStatus(ctx, cmd.Player)
+
+	case pb.MediaCommandType_MUTE:
+		if m.audio != nil {
+			if err := m.audio.ToggleMute(ctx); err != nil {
+				return nil, fmt.Errorf("system audio toggle mute: %w", err)
+			}
+		}
+		return m.GetStatus(ctx, cmd.Player)
+
+	case pb.MediaCommandType_PLAY_PAUSE,
+		pb.MediaCommandType_PLAY,
+		pb.MediaCommandType_PAUSE,
+		pb.MediaCommandType_NEXT,
+		pb.MediaCommandType_PREVIOUS,
+		pb.MediaCommandType_STOP:
+		return m.executeMprisTransportCommand(ctx, cmd)
+
+	default:
+		if cmd.Volume > 0 && m.audio != nil {
+			if err := m.audio.SetVolume(ctx, float64(cmd.Volume)); err != nil {
+				return nil, fmt.Errorf("system audio set volume: %w", err)
+			}
+			return m.GetStatus(ctx, cmd.Player)
+		}
+		return nil, fmt.Errorf("dbus mpris: unsupported media command %v", cmd.Command)
+	}
+}
+
+func (m *MediaController) executeMprisTransportCommand(ctx context.Context, cmd *pb.MediaControlCommand) (*pb.MediaStatusEvent, error) {
 	conn, err := connectSessionBus()
 	if err != nil {
 		return nil, err
@@ -137,49 +215,13 @@ func (m *MediaController) ExecuteCommand(ctx context.Context, cmd *pb.MediaContr
 		method = mprisPlayerInterface + ".Previous"
 	case pb.MediaCommandType_STOP:
 		method = mprisPlayerInterface + ".Stop"
-	case pb.MediaCommandType_VOLUME_UP:
-		return m.adjustVolume(ctx, conn, obj, dest, +0.05)
-	case pb.MediaCommandType_VOLUME_DOWN:
-		return m.adjustVolume(ctx, conn, obj, dest, -0.05)
-	case pb.MediaCommandType_MUTE:
-		return m.setVolume(ctx, conn, obj, dest, 0.0)
-	default:
-		return nil, fmt.Errorf("dbus mpris: unsupported media command %v", cmd.Command)
 	}
 
 	if call := obj.CallWithContext(ctx, method, 0); call.Err != nil {
 		return nil, fmt.Errorf("dbus mpris call %s on %s: %w", method, dest, call.Err)
 	}
 
-	status, err := readPlayerStatus(ctx, conn, dest)
-	if err != nil {
-		return &pb.MediaStatusEvent{Player: strings.TrimPrefix(dest, mprisPrefix)}, nil
-	}
-	return status, nil
-}
-
-func (m *MediaController) adjustVolume(ctx context.Context, conn *godbus.Conn, obj godbus.BusObject, dest string, delta float64) (*pb.MediaStatusEvent, error) {
-	curStatus, _ := readPlayerStatus(ctx, conn, dest)
-	curVol := 0.5
-	if curStatus != nil && curStatus.Volume > 0 {
-		curVol = float64(curStatus.Volume)
-	}
-	nextVol := curVol + delta
-	if nextVol < 0 {
-		nextVol = 0
-	}
-	if nextVol > 1.0 {
-		nextVol = 1.0
-	}
-	return m.setVolume(ctx, conn, obj, dest, nextVol)
-}
-
-func (m *MediaController) setVolume(ctx context.Context, conn *godbus.Conn, obj godbus.BusObject, dest string, vol float64) (*pb.MediaStatusEvent, error) {
-	call := obj.CallWithContext(ctx, dbusPropsSetMethod, 0, mprisPlayerInterface, "Volume", godbus.MakeVariant(vol))
-	if call.Err != nil {
-		return nil, fmt.Errorf("dbus mpris set Volume on %s: %w", dest, call.Err)
-	}
-	return readPlayerStatus(ctx, conn, dest)
+	return m.GetStatus(ctx, dest)
 }
 
 func connectSessionBus() (*godbus.Conn, error) {

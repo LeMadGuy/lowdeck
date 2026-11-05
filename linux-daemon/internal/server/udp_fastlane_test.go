@@ -57,6 +57,7 @@ func (m *mockFastLaneInjector) KeyAction(_ uint16, _ pb.ButtonAction) error { re
 func (m *mockFastLaneInjector) ExecuteSteps(_ []any) error                 { return nil }
 func (m *mockFastLaneInjector) ExecuteCombo(_ string) error                { return nil }
 func (m *mockFastLaneInjector) TypeText(_ string) error                    { return nil }
+func (m *mockFastLaneInjector) ReleaseAll() error                          { return nil }
 func (m *mockFastLaneInjector) IsDegraded() bool                           { return false }
 func (m *mockFastLaneInjector) Close() error                               { return nil }
 

@@ -104,6 +104,10 @@ const TerminalHTML = `<!DOCTYPE html>
       }
 
       // Android Bridge functions exposed on window
+      let lastSpecialSeq = null;
+      let lastSpecialSeqTime = 0;
+      const DEDUPLICATE_WINDOW_MS = 20;
+
       window.sendRawBase64 = function(b64String) {
         try {
           const binary = atob(b64String);
@@ -119,6 +123,14 @@ const TerminalHTML = `<!DOCTYPE html>
 
       window.sendSpecialSeq = function(seqString) {
         try {
+          const now = Date.now();
+          // Filter duplicate events occurring in < 20ms (FIX-05)
+          if (seqString === lastSpecialSeq && (now - lastSpecialSeqTime) < DEDUPLICATE_WINDOW_MS) {
+            return;
+          }
+          lastSpecialSeq = seqString;
+          lastSpecialSeqTime = now;
+
           const bytes = new TextEncoder().encode(seqString);
           sendRawBytes(bytes);
         } catch (e) {
@@ -152,7 +164,18 @@ const TerminalHTML = `<!DOCTYPE html>
             this.render();
           }, 500);
 
+          let lastCanvasKey = null;
+          let lastCanvasKeyTime = 0;
+
           window.addEventListener('keydown', (e) => {
+            const now = Date.now();
+            if (e.key === lastCanvasKey && (now - lastCanvasKeyTime) < DEDUPLICATE_WINDOW_MS) {
+              e.preventDefault();
+              return;
+            }
+            lastCanvasKey = e.key;
+            lastCanvasKeyTime = now;
+
             if (e.key === 'Backspace') {
               window.sendSpecialSeq('\b');
               e.preventDefault();
@@ -279,7 +302,16 @@ const TerminalHTML = `<!DOCTYPE html>
               fitAddon.fit();
             }
 
+            let lastOnData = null;
+            let lastOnDataTime = 0;
+
             term.onData(function(data) {
+              const now = Date.now();
+              if (data === lastOnData && (now - lastOnDataTime) < DEDUPLICATE_WINDOW_MS) {
+                return;
+              }
+              lastOnData = data;
+              lastOnDataTime = now;
               window.sendSpecialSeq(data);
             });
 

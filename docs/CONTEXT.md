@@ -247,3 +247,7 @@ Os agentes devem executar os arquivos de especificação abaixo em ordem e marca
 | **FIX-01** | `docs/fixes/FIX-01-UDP-FASTLANE.md` (ou `fix-10.md`) | Picos de latência de $430\text{ ms}$ no cabo/Wi-Fi e HoL blocking no Trackpad/Ping. | `[x] Concluído` |
 | **FIX-02** | `docs/fixes/FIX-02-XTERM-PTY.md` (ou `fix-09.md`) | Lentidão extrema e crash fatal do app Android após carregar o Terminal Remoto. | `[x] Concluído` |
 | **FIX-03** | `docs/fixes/FIX-03-PERSISTENT-SCREEN.md` (ou `fix-08.md`) | Loop infinito no WebRTC e ausência de sinal de vida na Tela Remota com stream MJPEG contínuo. | `[x] Concluído` |
+| **FIX-04** | `docs/fixes/fix-04.md` | Teclado do host travado por teclas presas no `/dev/uinput`; auto-release de 3s e registro de chaves até `0x2ff`. | `[x] Concluído` |
+| **FIX-05** | `docs/fixes/fix-05.md` | Repetição aleatória de caracteres no terminal xterm.js (debounce de 20ms no client e daemon). | `[x] Concluído` |
+| **FIX-06** | `docs/fixes/fix-06.md` | Tela preta no MJPEG remoto (conversão explícita `yuv420p` no FFmpeg e leitor por `Content-Length` no Android). | `[x] Concluído` |
+| **FIX-07** | Diagnóstico & Captura Wayland Nativa | Captura do desktop no KDE Plasma Wayland via interface DBus `org.kde.KWin.ScreenShot2` eliminando frames pretos do Xwayland rootless. | `[x] Concluído` |

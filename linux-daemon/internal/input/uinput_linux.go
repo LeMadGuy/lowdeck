@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	pb "github.com/local/linux-deck-daemon/pkg/protocol/v1"
@@ -49,6 +50,11 @@ const (
 	uiSetAbsBit  uintptr = 0x40045567
 	uiDevCreate  uintptr = 0x5501
 	uiDevDestroy uintptr = 0x5502
+
+	// Auto-release stuck keys after 3 seconds (FIX-04)
+	KeyAutoReleaseTimeout = 3 * time.Second
+	// Suppression filter for duplicate key/touch input within 20ms (FIX-05)
+	KeyDeduplicateWindow = 20 * time.Millisecond
 )
 
 // InputInjector abstracts kernel-level virtual input devices (/dev/uinput)
@@ -62,6 +68,7 @@ type InputInjector interface {
 	ExecuteSteps(steps []KeyStep) error
 	ExecuteCombo(combo string) error
 	TypeText(text string) error
+	ReleaseAll() error
 	IsDegraded() bool
 	Close() error
 }
@@ -105,11 +112,13 @@ type inputEvent struct {
 
 // KernelUinputInjector manages the 3 virtual /dev/uinput devices (Mouse Rel, TouchScreen Abs, Keyboard).
 type KernelUinputInjector struct {
-	mu       sync.Mutex
-	relMouse *os.File
-	absTouch *os.File
-	keyboard *os.File
-	closed   bool
+	mu          sync.Mutex
+	relMouse    *os.File
+	absTouch    *os.File
+	keyboard    *os.File
+	closed      bool
+	pressedKeys map[uint16]*time.Timer
+	lastPress   map[uint16]time.Time
 }
 
 // NewInputInjector attempts to initialize the 3 kernel /dev/uinput devices.
@@ -156,9 +165,11 @@ func NewKernelUinputInjector() (*KernelUinputInjector, error) {
 	}
 
 	return &KernelUinputInjector{
-		relMouse: relMouse,
-		absTouch: absTouch,
-		keyboard: keyboard,
+		relMouse:    relMouse,
+		absTouch:    absTouch,
+		keyboard:    keyboard,
+		pressedKeys: make(map[uint16]*time.Timer),
+		lastPress:   make(map[uint16]time.Time),
 	}, nil
 }
 
@@ -233,7 +244,99 @@ func (k *KernelUinputInjector) KeyAction(keyCode uint16, action pb.ButtonAction)
 	if k.closed {
 		return errors.New("input uinput: injector closed")
 	}
-	return emitButtonOrKey(k.keyboard, keyCode, action)
+
+	now := time.Now()
+
+	switch action {
+	case pb.ButtonAction_PRESS:
+		// Suppression filter for rapid duplicate PRESS within 20ms without an intervening RELEASE (FIX-05)
+		if last, ok := k.lastPress[keyCode]; ok && now.Sub(last) < KeyDeduplicateWindow {
+			return nil
+		}
+		k.lastPress[keyCode] = now
+
+		// Cancel any existing auto-release timer for this key
+		if t, ok := k.pressedKeys[keyCode]; ok && t != nil {
+			t.Stop()
+		}
+
+		// Schedule auto-release after 3 seconds (FIX-04)
+		code := keyCode
+		k.pressedKeys[code] = time.AfterFunc(KeyAutoReleaseTimeout, func() {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			if k.closed {
+				return
+			}
+			if _, stillPressed := k.pressedKeys[code]; stillPressed {
+				delete(k.pressedKeys, code)
+				delete(k.lastPress, code)
+				_ = writeEvents(k.keyboard, []inputEvent{
+					{Type: evKey, Code: code, Value: 0},
+					{Type: evSyn, Code: synReport, Value: 0},
+				})
+			}
+		})
+
+		return writeEvents(k.keyboard, []inputEvent{
+			{Type: evKey, Code: keyCode, Value: 1},
+			{Type: evSyn, Code: synReport, Value: 0},
+		})
+
+	case pb.ButtonAction_RELEASE:
+		if t, ok := k.pressedKeys[keyCode]; ok && t != nil {
+			t.Stop()
+		}
+		delete(k.pressedKeys, keyCode)
+		delete(k.lastPress, keyCode)
+
+		return writeEvents(k.keyboard, []inputEvent{
+			{Type: evKey, Code: keyCode, Value: 0},
+			{Type: evSyn, Code: synReport, Value: 0},
+		})
+
+	case pb.ButtonAction_CLICK, pb.ButtonAction_BUTTON_ACTION_UNSPECIFIED:
+		if t, ok := k.pressedKeys[keyCode]; ok && t != nil {
+			t.Stop()
+		}
+		delete(k.pressedKeys, keyCode)
+		delete(k.lastPress, keyCode)
+
+		return writeEvents(k.keyboard, []inputEvent{
+			{Type: evKey, Code: keyCode, Value: 1},
+			{Type: evSyn, Code: synReport, Value: 0},
+			{Type: evKey, Code: keyCode, Value: 0},
+			{Type: evSyn, Code: synReport, Value: 0},
+		})
+
+	default:
+		return fmt.Errorf("input uinput: unsupported button action %v", action)
+	}
+}
+
+// ReleaseAll forces release of all currently pressed keys (FIX-04).
+func (k *KernelUinputInjector) ReleaseAll() error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closed {
+		return nil
+	}
+
+	var events []inputEvent
+	for code, t := range k.pressedKeys {
+		if t != nil {
+			t.Stop()
+		}
+		events = append(events, inputEvent{Type: evKey, Code: code, Value: 0})
+	}
+	k.pressedKeys = make(map[uint16]*time.Timer)
+	k.lastPress = make(map[uint16]time.Time)
+
+	if len(events) > 0 {
+		events = append(events, inputEvent{Type: evSyn, Code: synReport, Value: 0})
+		return writeEvents(k.keyboard, events)
+	}
+	return nil
 }
 
 func (k *KernelUinputInjector) ExecuteSteps(steps []KeyStep) error {
@@ -277,6 +380,13 @@ func (k *KernelUinputInjector) Close() error {
 		return nil
 	}
 	k.closed = true
+	for _, t := range k.pressedKeys {
+		if t != nil {
+			t.Stop()
+		}
+	}
+	k.pressedKeys = nil
+	k.lastPress = nil
 	destroyDevice(k.relMouse)
 	destroyDevice(k.absTouch)
 	destroyDevice(k.keyboard)
@@ -374,12 +484,9 @@ func createKeyboardDevice() (*os.File, error) {
 			return nil, err
 		}
 	}
-	// Enable standard Linux keycodes (1..248).
-	for key := uintptr(1); key <= 248; key++ {
-		if err := ioctl(fd, uiSetKeyBit, key); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
+	// Enable standard and extended Linux keycodes (1..KEY_MAX / 0x2ff).
+	for key := uintptr(1); key <= 0x2ff; key++ {
+		_ = ioctl(fd, uiSetKeyBit, key)
 	}
 
 	var udev uinputUserDev
@@ -622,6 +729,18 @@ func (m *MockInjector) TypeText(text string) error {
 		Kind:      "type_text",
 		ComboText: text,
 		KeySteps:  steps,
+	})
+	return nil
+}
+
+func (m *MockInjector) ReleaseAll() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return errors.New("mock injector closed")
+	}
+	m.events = append(m.events, RecordedEvent{
+		Kind: "release_all",
 	})
 	return nil
 }

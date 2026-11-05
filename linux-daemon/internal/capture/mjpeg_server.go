@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/godbus/dbus/v5"
 )
 
 const (
@@ -173,52 +175,63 @@ func (s *MjpegServer) handleScreenMjpeg(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Check if we can run Option 1: Wayland / PipeWire com GStreamer
-	if _, err := exec.LookPath("gst-launch-1.0"); err == nil && os.Getenv("WAYLAND_DISPLAY") != "" {
-		s.logger.Info("attempting Option 1: PipeWire + GStreamer MJPEG pipeline")
-		cmd := exec.CommandContext(r.Context(), "gst-launch-1.0", "-q",
-			"pipewiresrc", "do-timestamp=true",
-			"!", "videoconvert",
-			"!", "videoscale",
-			"!", "videorate",
-			"!", "image/jpeg,width=1280,height=720,framerate=25/1,quality=70",
-			"!", "multipartmux", "boundary=frame",
-			"!", "fdsink", "fd=1",
-		)
-		if s.tryRunProcess(r.Context(), cmd, w, flusher) {
+	// Capture backend auto-detection
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		// Wayland Option 1: Native KDE Plasma Wayland via KWin DBus ScreenShot2 interface
+		s.logger.Info("attempting Option 1: KDE Plasma Wayland KWin ScreenShot2 DBus interface")
+		if s.tryStreamKWinWayland(w, r, flusher) {
 			return
 		}
-	}
 
-	// Check if we can run Option 2: X11 / XWayland com FFmpeg
-	display := os.Getenv("DISPLAY")
-	if display == "" {
-		display = ":0"
-	}
-	if _, err := exec.LookPath("ffmpeg"); err == nil {
-		s.logger.Info("attempting Option 2: X11/XWayland + FFmpeg MJPEG pipeline", "display", display)
-		cmd := exec.CommandContext(r.Context(), "ffmpeg",
-			"-loglevel", "quiet",
-			"-f", "x11grab",
-			"-framerate", "25",
-			"-i", display,
-			"-vf", "scale=1280:-1",
-			"-q:v", "7",
-			"-f", "mpjpeg",
-			"-boundary_tag", "frame",
-			"-",
-		)
-		if s.tryRunProcess(r.Context(), cmd, w, flusher) {
-			return
+		// Wayland Option 2: PipeWire with GStreamer
+		if _, err := exec.LookPath("gst-launch-1.0"); err == nil {
+			s.logger.Info("attempting Option 2: PipeWire + GStreamer MJPEG pipeline")
+			cmd := exec.CommandContext(r.Context(), "gst-launch-1.0", "-q",
+				"pipewiresrc", "do-timestamp=true",
+				"!", "videoconvert",
+				"!", "video/x-raw,format=RGB",
+				"!", "videoconvert",
+				"!", "videoscale",
+				"!", "videorate",
+				"!", "avenc_mjpeg",
+				"!", "avmux_mpjpeg",
+				"!", "fdsink", "fd=1",
+			)
+			if s.tryRunProcess(r.Context(), cmd, w, flusher) {
+				return
+			}
 		}
-	}
 
-	// Check if we can run Option 3: wf-recorder + ffmpeg pipe
-	if _, errWf := exec.LookPath("wf-recorder"); errWf == nil {
-		if _, errFf := exec.LookPath("ffmpeg"); errFf == nil && os.Getenv("WAYLAND_DISPLAY") != "" {
-			s.logger.Info("attempting Option 3: wf-recorder + FFmpeg pipe")
-			cmd := exec.CommandContext(r.Context(), "bash", "-c",
-				"wf-recorder -c rawvideo -m avi -f pipe:1 | ffmpeg -loglevel quiet -i pipe:0 -vf scale=1280:-1 -q:v 7 -f mpjpeg -boundary_tag frame -",
+		// Wayland Option 3: wf-recorder + FFmpeg pipe
+		if _, errWf := exec.LookPath("wf-recorder"); errWf == nil {
+			if _, errFf := exec.LookPath("ffmpeg"); errFf == nil {
+				s.logger.Info("attempting Option 3: wf-recorder + FFmpeg pipe")
+				cmd := exec.CommandContext(r.Context(), "bash", "-c",
+					"wf-recorder -c rawvideo -m avi -f pipe:1 | ffmpeg -loglevel quiet -i pipe:0 -vf scale=1280:-1,format=yuv420p -q:v 7 -f mpjpeg -boundary_tag frame -",
+				)
+				if s.tryRunProcess(r.Context(), cmd, w, flusher) {
+					return
+				}
+			}
+		}
+	} else {
+		// Pure X11 Option: FFmpeg x11grab (only when WAYLAND_DISPLAY is unset)
+		display := os.Getenv("DISPLAY")
+		if display == "" {
+			display = ":0"
+		}
+		if _, err := exec.LookPath("ffmpeg"); err == nil {
+			s.logger.Info("attempting Option X11: Native X11 + FFmpeg MJPEG pipeline", "display", display)
+			cmd := exec.CommandContext(r.Context(), "ffmpeg",
+				"-loglevel", "quiet",
+				"-f", "x11grab",
+				"-framerate", "25",
+				"-i", display,
+				"-vf", "scale=1280:-1,format=yuv420p",
+				"-q:v", "7",
+				"-f", "mpjpeg",
+				"-boundary_tag", "frame",
+				"-",
 			)
 			if s.tryRunProcess(r.Context(), cmd, w, flusher) {
 				return
@@ -226,9 +239,161 @@ func (s *MjpegServer) handleScreenMjpeg(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// Option 4: Universal Fallback (grim or pure Go synthetic generator)
-	s.logger.Info("pipelines exited or unavailable; running Option 4: Universal Fallback loop (15 FPS)")
+	// Universal Fallback (grim or pure Go synthetic generator)
+	s.logger.Info("pipelines exited or unavailable; running Universal Fallback loop (15 FPS)")
 	s.streamUniversalFallback(w, r, flusher)
+}
+
+// tryStreamKWinWayland captures the full Wayland workspace via KDE Plasma's
+// native org.kde.KWin.ScreenShot2 DBus interface and streams multipart MJPEG frames.
+func (s *MjpegServer) tryStreamKWinWayland(w http.ResponseWriter, r *http.Request, flusher http.Flusher) bool {
+	conn, err := dbus.ConnectSessionBus()
+	if err != nil {
+		s.logger.Debug("kwin dbus session bus connect failed", "err", err)
+		return false
+	}
+	defer conn.Close()
+
+	obj := conn.Object("org.kde.KWin.ScreenShot2", "/org/kde/KWin/ScreenShot2")
+
+	// Create reusable temp file in RAM tmpfs (/dev/shm) for high performance
+	f, err := os.CreateTemp("/dev/shm", "lowdeck_kwin_*.raw")
+	if err != nil {
+		f, err = os.CreateTemp("", "lowdeck_kwin_*.raw")
+		if err != nil {
+			s.logger.Debug("failed to create temp file for kwin screenshot", "err", err)
+			return false
+		}
+	}
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}()
+
+	captureOpts := map[string]dbus.Variant{
+		"include-cursor": dbus.MakeVariant(true),
+	}
+
+	// Probe initial call to ensure KWin ScreenShot2 is responsive
+	var initialRes map[string]dbus.Variant
+	call := obj.CallWithContext(r.Context(), "org.kde.KWin.ScreenShot2.CaptureWorkspace", 0, captureOpts, dbus.UnixFD(f.Fd()))
+	if call.Err != nil {
+		s.logger.Debug("kwin screenshot2 probe call failed", "err", call.Err)
+		return false
+	}
+	if err := call.Store(&initialRes); err != nil {
+		s.logger.Debug("kwin screenshot2 probe store failed", "err", err)
+		return false
+	}
+
+	toUint32 := func(v any) uint32 {
+		switch n := v.(type) {
+		case uint32:
+			return n
+		case int32:
+			return uint32(n)
+		case int:
+			return uint32(n)
+		case uint64:
+			return uint32(n)
+		case int64:
+			return uint32(n)
+		default:
+			return 0
+		}
+	}
+
+	width := int(toUint32(initialRes["width"].Value()))
+	height := int(toUint32(initialRes["height"].Value()))
+	stride := int(toUint32(initialRes["stride"].Value()))
+	if width <= 0 || height <= 0 || stride <= 0 {
+		s.logger.Debug("invalid dimensions from kwin screenshot2", "w", width, "h", height, "stride", stride)
+		return false
+	}
+
+	s.logger.Info("streaming Wayland desktop via KWin ScreenShot2 DBus interface",
+		"width", width, "height", height, "stride", stride)
+
+	rawSize := stride * height
+	buf := make([]byte, rawSize)
+	var jpegBuf bytes.Buffer
+
+	// Pacing loop: ~25 FPS (40ms target interval)
+	targetInterval := 40 * time.Millisecond
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return true
+		default:
+		}
+
+		frameStart := time.Now()
+
+		_, _ = f.Seek(0, 0)
+		_ = f.Truncate(0)
+
+		var res map[string]dbus.Variant
+		c := obj.CallWithContext(r.Context(), "org.kde.KWin.ScreenShot2.CaptureWorkspace", 0, captureOpts, dbus.UnixFD(f.Fd()))
+		if c.Err != nil {
+			s.logger.Debug("kwin screenshot frame call error", "err", c.Err)
+			return true
+		}
+		if err := c.Store(&res); err != nil {
+			return true
+		}
+
+		curW := int(toUint32(res["width"].Value()))
+		curH := int(toUint32(res["height"].Value()))
+		curStride := int(toUint32(res["stride"].Value()))
+		if curW <= 0 || curH <= 0 || curStride <= 0 {
+			continue
+		}
+		curSize := curStride * curH
+
+		if curSize > len(buf) {
+			buf = make([]byte, curSize)
+		}
+
+		_, _ = f.Seek(0, 0)
+		if _, err := io.ReadFull(f, buf[:curSize]); err != nil {
+			s.logger.Debug("failed to read kwin raw frame", "err", err)
+			return true
+		}
+
+		img := &image.RGBA{
+			Pix:    buf[:curSize],
+			Stride: curStride,
+			Rect:   image.Rect(0, 0, curW, curH),
+		}
+
+		jpegBuf.Reset()
+		if err := jpeg.Encode(&jpegBuf, img, &jpeg.Options{Quality: 65}); err != nil {
+			s.logger.Debug("failed to encode kwin jpeg frame", "err", err)
+			return true
+		}
+
+		header := fmt.Sprintf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", jpegBuf.Len())
+		if _, err := io.WriteString(w, header); err != nil {
+			return true
+		}
+		if _, err := w.Write(jpegBuf.Bytes()); err != nil {
+			return true
+		}
+		if _, err := io.WriteString(w, "\r\n"); err != nil {
+			return true
+		}
+		flusher.Flush()
+
+		elapsed := time.Since(frameStart)
+		if elapsed < targetInterval {
+			select {
+			case <-r.Context().Done():
+				return true
+			case <-time.After(targetInterval - elapsed):
+			}
+		}
+	}
 }
 
 func (s *MjpegServer) tryRunProcess(ctx context.Context, cmd *exec.Cmd, w http.ResponseWriter, flusher http.Flusher) bool {

@@ -88,3 +88,36 @@ func TestWebTerminal_WebSocketPtySessionAndResize(t *testing.T) {
 	}
 }
 
+func TestWebTerminal_DeduplicateRapidOpData(t *testing.T) {
+	wt := NewWebTerminal(nil)
+
+	mux := http.NewServeMux()
+	wt.RegisterRoutes(mux)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/pty"
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial websocket: %v", err)
+	}
+	defer ws.Close()
+
+	// Send duplicate OP_DATA in rapid succession (< 5ms)
+	pkt := []byte{0x00, 'X'}
+	if err := ws.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
+		t.Fatalf("write message: %v", err)
+	}
+	// Rapid duplicate immediately
+	if err := ws.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
+		t.Fatalf("write message: %v", err)
+	}
+
+	// Now send \n after 30ms
+	time.Sleep(30 * time.Millisecond)
+	if err := ws.WriteMessage(websocket.BinaryMessage, []byte{0x00, '\n'}); err != nil {
+		t.Fatalf("write newline: %v", err)
+	}
+}
+

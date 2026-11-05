@@ -153,6 +153,7 @@ func main() {
 	wsSrv.OnDisconnect(func(client server.ClientSession) {
 		ptyMgr.CloseClientSessions(client.ID())
 		webrtcSig.CloseClientStream(client.ID())
+		_ = inputInjector.ReleaseAll()
 	})
 
 	listenAddr, err := wsSrv.Start(ctx)

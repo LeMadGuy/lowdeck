@@ -214,6 +214,33 @@ fun RemoteDesktopScreen(
                 inMutable = true
             }
 
+            fun readAsciiLine(stream: BufferedInputStream): String? {
+                val sb = StringBuilder(64)
+                while (true) {
+                    val b = stream.read()
+                    if (b == -1) {
+                        return if (sb.isNotEmpty()) sb.toString() else null
+                    }
+                    if (b == '\n'.code) {
+                        val s = sb.toString()
+                        return if (s.endsWith("\r")) s.substring(0, s.length - 1) else s
+                    }
+                    sb.append(b.toChar())
+                    if (sb.length > 512) return sb.toString()
+                }
+            }
+
+            fun readExactBytes(stream: BufferedInputStream, b: ByteArray, off: Int, len: Int) {
+                var total = 0
+                while (total < len) {
+                    val count = stream.read(b, off + total, len - total)
+                    if (count < 0) {
+                        throw IOException("Fim prematuro do stream ao ler payload JPEG")
+                    }
+                    total += count
+                }
+            }
+
             while (isActive) {
                 var conn: HttpURLConnection? = null
                 var stream: BufferedInputStream? = null
@@ -232,42 +259,34 @@ fun RemoteDesktopScreen(
                         throw IOException("HTTP ${conn.responseCode}: ${conn.responseMessage}")
                     }
 
-                    stream = BufferedInputStream(conn.inputStream, 64 * 1024)
-                    val buffer = ByteArrayOutputStream(128 * 1024)
-                    var prevByte = -1
+                    stream = BufferedInputStream(conn.inputStream, 128 * 1024)
+                    var contentLength = -1
 
                     while (isActive) {
-                        val b = stream.read()
-                        if (b == -1) break
-
-                        // Detect JPEG SOI (0xFF, 0xD8)
-                        if (prevByte == 0xFF && b == 0xD8) {
-                            buffer.reset()
-                            buffer.write(0xFF)
-                            buffer.write(0xD8)
-                            prevByte = -1
-
-                            // Read until JPEG EOI (0xFF, 0xD9)
-                            var innerPrev = -1
-                            while (isActive) {
-                                val ib = stream.read()
-                                if (ib == -1) break
-                                buffer.write(ib)
-                                if (innerPrev == 0xFF && ib == 0xD9) {
-                                    val jpegBytes = buffer.toByteArray()
-                                    val bmp = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, options)
-                                    if (bmp != null) {
-                                        desktopBitmap = bmp.asImageBitmap()
-                                        if (bmp.width != videoResolution.width || bmp.height != videoResolution.height) {
-                                            videoResolution = VideoResolution(bmp.width, bmp.height)
-                                        }
+                        val line = readAsciiLine(stream) ?: break
+                        val trimmed = line.trim()
+                        if (trimmed.isEmpty()) {
+                            // Empty line marks end of multipart headers for current frame (FIX-06)
+                            if (contentLength in 1..(10 * 1024 * 1024)) {
+                                val frameBytes = ByteArray(contentLength)
+                                readExactBytes(stream, frameBytes, 0, contentLength)
+                                val bmp = BitmapFactory.decodeByteArray(frameBytes, 0, contentLength, options)
+                                if (bmp != null) {
+                                    desktopBitmap = bmp.asImageBitmap()
+                                    if (bmp.width != videoResolution.width || bmp.height != videoResolution.height) {
+                                        videoResolution = VideoResolution(bmp.width, bmp.height)
                                     }
-                                    break
                                 }
-                                innerPrev = ib
+                                contentLength = -1
                             }
                         } else {
-                            prevByte = b
+                            val lower = trimmed.lowercase()
+                            if (lower.startsWith("content-length:")) {
+                                val parts = trimmed.split(":", limit = 2)
+                                if (parts.size == 2) {
+                                    contentLength = parts[1].trim().toIntOrNull() ?: -1
+                                }
+                            }
                         }
                     }
                 } catch (e: Exception) {

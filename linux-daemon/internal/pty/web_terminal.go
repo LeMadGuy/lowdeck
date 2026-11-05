@@ -1,6 +1,7 @@
 package pty
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -171,6 +172,10 @@ func (wt *WebTerminal) WsHandler() http.HandlerFunc {
 		}()
 
 		// Loop: Read incoming client binary messages
+		var lastData []byte
+		var lastDataTime time.Time
+		const ptyDeduplicateWindow = 20 * time.Millisecond
+
 		for {
 			messageType, payload, msgErr := ws.ReadMessage()
 			if msgErr != nil {
@@ -194,6 +199,15 @@ func (wt *WebTerminal) WsHandler() http.HandlerFunc {
 			switch op {
 			case 0x00: // OP_DATA: Write raw bytes to PTY stdin
 				if len(data) > 0 {
+					now := time.Now()
+					// Filter duplicate input events occurring in < 20ms (FIX-05)
+					if bytes.Equal(data, lastData) && now.Sub(lastDataTime) < ptyDeduplicateWindow {
+						continue
+					}
+					lastData = make([]byte, len(data))
+					copy(lastData, data)
+					lastDataTime = now
+
 					_, _ = ptmx.Write(data)
 				}
 			case 0x01: // OP_RESIZE: Resize JSON {"cols": 100, "rows": 30}

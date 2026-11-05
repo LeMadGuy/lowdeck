@@ -215,3 +215,21 @@ func TestRouterInputHandlersWithMockInjector(t *testing.T) {
 	}
 }
 
+func TestMockInjector_ReleaseAll(t *testing.T) {
+	t.Parallel()
+	mock := NewMockInjector()
+	if err := mock.KeyAction(KeyLeftCtrl, pb.ButtonAction_PRESS); err != nil {
+		t.Fatalf("KeyAction PRESS error: %v", err)
+	}
+	if err := mock.ReleaseAll(); err != nil {
+		t.Fatalf("ReleaseAll error: %v", err)
+	}
+	events := mock.Events()
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if events[1].Kind != "release_all" {
+		t.Fatalf("expected release_all event, got %s", events[1].Kind)
+	}
+}
+

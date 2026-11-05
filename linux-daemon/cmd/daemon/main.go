@@ -43,6 +43,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	bridgeMgr := discovery.NewBridgeManager(*port, *screenPort, *pairingPort, logger)
+	wifiIP := bridgeMgr.PrepareWiFi(ctx)
+	bridgeMgr.StartUsbWatcher(ctx)
+
 	serverIdentity, err := auth.LoadOrCreateServerIdentity(*configDir)
 	if err != nil {
 		logger.Error("failed to initialize server certificate identity", "err", err)
@@ -64,14 +68,18 @@ func main() {
 	}
 
 	if enablePairing {
-		payload, err := pairingMgr.GenerateSession(*host, *port, *pairingPort)
+		targetHost := *host
+		if strings.TrimSpace(targetHost) == "" {
+			targetHost = wifiIP
+		}
+		payload, err := pairingMgr.GenerateSession(targetHost, *port, *pairingPort)
 		if err != nil {
 			logger.Error("failed to generate pairing session", "err", err)
 			os.Exit(1)
 		}
 
 		fmt.Println("================================================================")
-		fmt.Println("  LINUX DECK DAEMON — PAIRING QR CODE (Valid for 5 minutes)")
+		fmt.Println("  LINUX DECK DAEMON — PRONTO PARA WI-FI E USB (Válido por 5 min)")
 		fmt.Println("================================================================")
 		if err := auth.PrintQRCode(payload); err != nil {
 			logger.Error("failed to render QR code", "err", err)
@@ -82,7 +90,8 @@ func main() {
 		fmt.Printf("Pairing Token: %s\n", payload.Token)
 		fmt.Printf("Server SHA256: %s\n", payload.ServerFP)
 		fmt.Printf("Expires At:    %s\n", time.Unix(payload.ExpiresAt, 0).Format(time.RFC3339))
-		fmt.Printf("USB (ADB):     adb reverse tcp:%d tcp:%d && adb reverse tcp:%d tcp:%d && adb reverse tcp:%d tcp:%d\n", *port, *port, *screenPort, *screenPort, *pairingPort, *pairingPort)
+		fmt.Printf("[Wi-Fi]        Host: %s (Portas %d, %d, %d TCP / %d UDP)\n", payload.Host, *port, *screenPort, *pairingPort, *port)
+		fmt.Printf("[USB / ADB]    Portas mapeadas no celular -> 127.0.0.1 (Watcher automático ativo)\n")
 		fmt.Printf("Wi-Fi (UFW):   sudo ufw allow %d,%d,%d/tcp && sudo ufw allow %d/udp\n", *port, *screenPort, *pairingPort, *port)
 		fmt.Println("================================================================")
 

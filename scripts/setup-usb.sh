@@ -27,6 +27,6 @@ echo "==> Portas ativas no adb reverse:"
 adb reverse --list
 
 echo ""
-echo "==> Sucesso! Para iniciar o pareamento via USB, execute no terminal:"
-echo "    deck-daemon --pair --host 127.0.0.1"
+echo "==> Sucesso! O deck-daemon agora gerencia o adb reverse e o Wi-Fi automaticamente."
+echo "    Basta executar 'deck-daemon' (ou 'deck-daemon --pair') e conectar via USB ou Wi-Fi!"
 

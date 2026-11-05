@@ -217,11 +217,11 @@ A arquitetura v3 do **LowDeck** resolve esses três problemas na raiz dividindo 
 4. **Porta `:8445/tcp` (Servidor de Pareamento Automático e Troca de Chaves mTLS):**
    * Usado para escanear o QR Code ou receber a chave de pareamento e instalar os certificados mTLS com segurança.
 
-### Conexão USB (ADB Reverse)
-Para conectar via cabo USB (loopback `127.0.0.1`), execute o script `./scripts/setup-usb.sh` ou manualmente:
-```bash
-adb reverse tcp:8443 tcp:8443 && adb reverse tcp:8444 tcp:8444 && adb reverse tcp:8445 tcp:8445
-```
+### Conexão Híbrida Automática (Wi-Fi e USB Simultâneos)
+A partir do `BridgeManager` no daemon e da seleção de hosts candidatos no cliente Android:
+* O daemon executa automaticamente o monitor USB via ADB (`adb reverse tcp:8443... 8444... 8445...`) tanto na inicialização quanto em segundo plano ao plugar o cabo.
+* O daemon otimiza a métrica de rotas do Wi-Fi (`ipv4.route-metric 50`) no NetworkManager se houver interface Ethernet na mesma sub-rede, evitando descarte de pacotes pelo `rp_filter`.
+* O cliente Android alterna de forma transparente entre o IP de LAN Wi-Fi e `127.0.0.1` (cabo USB), bastando ao usuário conectar o cabo ou usar o Wi-Fi sem necessidade de reconfiguração manual.
 
 ---
 

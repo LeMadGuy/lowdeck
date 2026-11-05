@@ -115,6 +115,27 @@ class DeckSessionClient(
 
     private var connectionLoopJob: Job? = null
     private var activeConfig: PairedHostConfig? = null
+    @Volatile
+    private var lastKnownLanHost: String? = null
+
+    private fun buildCandidateHosts(primaryHost: String): List<String> {
+        val list = mutableListOf<String>()
+        val trimmed = primaryHost.trim()
+        if (trimmed.isNotEmpty()) {
+            list.add(trimmed)
+            if (trimmed != "127.0.0.1" && !trimmed.equals("localhost", ignoreCase = true)) {
+                lastKnownLanHost = trimmed
+                list.add("127.0.0.1")
+            } else {
+                lastKnownLanHost?.let {
+                    if (it !in list) list.add(it)
+                }
+            }
+        } else {
+            list.add("127.0.0.1")
+        }
+        return list
+    }
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected())
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -154,40 +175,52 @@ class DeckSessionClient(
             var attempt = 0
             while (isActive) {
                 attempt++
-                _connectionState.value = ConnectionState.Connecting(
+                val candidates = buildCandidateHosts(config.host)
+                var lastOutcome = SessionOutcome.RetryableFailure(
+                    error = "Falha ao conectar aos canais disponíveis (Wi-Fi/USB)",
+                    wasConnected = false,
+                )
+
+                for (targetHost in candidates) {
+                    _connectionState.value = ConnectionState.Connecting(
+                        host = targetHost,
+                        port = config.port,
+                        attempt = attempt,
+                    )
+
+                    val outcome = runSingleSession(config, targetHost)
+                    when (outcome) {
+                        is SessionOutcome.CleanDisconnect -> {
+                            _connectionState.value = ConnectionState.Disconnected(outcome.reason)
+                            return@launch
+                        }
+
+                        is SessionOutcome.FatalAuthError -> {
+                            _connectionState.value = ConnectionState.AuthFailed(outcome.message)
+                            return@launch
+                        }
+
+                        is SessionOutcome.RetryableFailure -> {
+                            lastOutcome = outcome
+                            if (outcome.wasConnected) {
+                                break
+                            }
+                        }
+                    }
+                }
+
+                if (lastOutcome.wasConnected) {
+                    attempt = 1
+                }
+                val delayMs = ExponentialBackoffPolicy.computeDelayMs(attempt)
+                _connectionState.value = ConnectionState.Reconnecting(
                     host = config.host,
                     port = config.port,
                     attempt = attempt,
+                    nextRetryDelayMs = delayMs,
+                    lastError = lastOutcome.error,
                 )
-
-                val outcome = runSingleSession(config)
-                when (outcome) {
-                    is SessionOutcome.CleanDisconnect -> {
-                        _connectionState.value = ConnectionState.Disconnected(outcome.reason)
-                        return@launch
-                    }
-
-                    is SessionOutcome.FatalAuthError -> {
-                        _connectionState.value = ConnectionState.AuthFailed(outcome.message)
-                        return@launch
-                    }
-
-                    is SessionOutcome.RetryableFailure -> {
-                        if (outcome.wasConnected) {
-                            // Reset attempt counter if the session had successfully established before dropping.
-                            attempt = 1
-                        }
-                        val delayMs = ExponentialBackoffPolicy.computeDelayMs(attempt)
-                        _connectionState.value = ConnectionState.Reconnecting(
-                            host = config.host,
-                            port = config.port,
-                            attempt = attempt,
-                            nextRetryDelayMs = delayMs,
-                            lastError = outcome.error,
-                        )
-                        delay(delayMs)
-                    }
-                }
+                delay(delayMs)
             }
         }
     }
@@ -249,7 +282,10 @@ class DeckSessionClient(
         ws.send(bytes)
     }
 
-    private suspend fun runSingleSession(config: PairedHostConfig): SessionOutcome = withContext(ioDispatcher) {
+    private suspend fun runSingleSession(
+        config: PairedHostConfig,
+        targetHost: String = config.host,
+    ): SessionOutcome = withContext(ioDispatcher) {
         val sessionEnded = CompletableDeferred<SessionOutcome>()
         var handshakeAccepted = false
 
@@ -257,7 +293,7 @@ class DeckSessionClient(
             keyManager.buildPinnedOkHttpClient(
                 expectedServerFingerprintSha256 = config.serverFingerprintSha256,
                 deviceName = config.deviceName,
-                connectTimeoutSeconds = 8L,
+                connectTimeoutSeconds = 4L,
                 pingIntervalSeconds = 15L,
             )
         } catch (err: Exception) {
@@ -266,7 +302,7 @@ class DeckSessionClient(
             )
         }
 
-        val wsUrl = "wss://${config.host}:${config.port}/ws"
+        val wsUrl = "wss://$targetHost:${config.port}/ws"
         val request = Request.Builder().url(wsUrl).build()
 
         val heartbeatJob = scope.launch {
@@ -311,10 +347,10 @@ class DeckSessionClient(
                             if (resp.accepted && resp.status == SessionStatus.SESSION_ACTIVE) {
                                 handshakeAccepted = true
                                 _connectionState.value = ConnectionState.Connected(
-                                    host = config.host,
+                                    host = targetHost,
                                     port = config.port,
                                     sessionId = resp.sessionId,
-                                    hostDeviceName = resp.deviceName.ifEmpty { config.host },
+                                    hostDeviceName = resp.deviceName.ifEmpty { targetHost },
                                     latencyMs = _latencyMs.value,
                                 )
                             } else {

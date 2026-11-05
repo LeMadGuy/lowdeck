@@ -1,89 +1,61 @@
 # Linux Deck & Remote Control
 
-Plataforma completa de **Macro Deck Dinâmico**, **Trackpad/Teclado Kernel-level (`/dev/uinput`)**, **Desktop Remoto de Baixíssima Latência (PipeWire + GStreamer + WebRTC)** e **Terminal Interativo (`PTY`)** entre um cliente **Android** e um host **Linux** (compatível com **Wayland**, **X11**, telas de login **SDDM/GDM** e **TTY**).
+Plataforma completa de **Macro Deck Dinâmico**, **Trackpad/Teclado Kernel-level (`/dev/uinput`)**, **Desktop Remoto de Baixíssima Latência (Stream Contínuo MJPEG)** e **Terminal Interativo (`PTY` + `xterm.js`)** entre um cliente **Android** e um host **Linux** (compatível com **Wayland**, **X11**, telas de login **SDDM/GDM** e **TTY**).
 
 ---
 
 ## Sumário
 
 1. [Visão Geral e Arquitetura](#1-visão-geral-e-arquitetura)
-2. [Estrutura do Monorepo](#2-estrutura-do-monorepo)
-3. [Instalação de Dependências no Linux](#3-instalação-de-dependências-no-linux)
-4. [Configuração de Permissões udev (`/dev/uinput`)](#4-configuração-de-permissões-udev-devuinput)
-5. [Compilação do Protocolo e do Daemon Linux](#5-compilação-do-protocolo-e-do-daemon-linux)
-6. [Execução do Daemon e Serviço `systemd --user`](#6-execução-do-daemon-e-serviço-systemd---user)
-7. [Pareamento Seguro mTLS 1.3 via QR Code](#7-pareamento-seguro-mtls-13-via-qr-code)
-8. [Conexão via Wi-Fi, Tailscale e Cabo USB (`adb reverse`)](#8-conexão-via-wi-fi-tailscale-e-cabo-usb-adb-reverse)
-9. [Build e Instalação do Aplicativo Android](#9-build-e-instalação-do-aplicativo-android)
-10. [Validação End-to-End via CLI (`mock-client`)](#10-validação-end-to-end-via-cli-mock-client)
-11. [Solução de Problemas (Troubleshooting)](#11-solução-de-problemas-troubleshooting)
+2. [Instalação de Dependências no Linux](#2-instalação-de-dependências-no-linux)
+3. [Configuração de Permissões udev (`/dev/uinput`)](#3-configuração-de-permissões-udev-devuinput)
+4. [Compilação do Protocolo e do Daemon Linux](#4-compilação-do-protocolo-e-do-daemon-linux)
+5. [Execução do Daemon e Serviço `systemd --user`](#5-execução-do-daemon-e-serviço-systemd---user)
+6. [Pareamento Seguro mTLS 1.3 via QR Code](#6-pareamento-seguro-mtls-13-via-qr-code)
+7. [Conexão Híbrida Automática: Wi-Fi, Cabo USB (`adb reverse`) e Tailscale](#7-conexão-híbrida-automática-wi-fi-cabo-usb-adb-reverse-e-tailscale)
+8. [Build e Instalação do Aplicativo Android](#8-build-e-instalação-do-aplicativo-android)
+9. [Validação End-to-End via CLI (`mock-client`)](#9-validação-end-to-end-via-cli-mock-client)
+10. [Solução de Problemas (Troubleshooting)](#10-solução-de-problemas-troubleshooting)
 
 ---
 
 ## 1. Visão Geral e Arquitetura
 
-O sistema unifica quatro modos operacionais sobre um único canal de controle autenticado via **mTLS 1.3 (X.509 ECDSA P-256)** com **Certificate Pinning SHA-256** e **WebSockets Binários (`Protocol Buffers v3`)**:
+O sistema opera sob arquitetura de canal duplo dedicada (Dual-Channel): canal de controle e sincronização autenticado via **mTLS 1.3 (X.509 ECDSA P-256)** com **Certificate Pinning SHA-256** e **WebSockets Binários (`Protocol Buffers v3`)**, canal de input ultra-rápido via **UDP Fast-Lane (`:8443/udp`)** e servidor dedicado de mídia/PTY (`:8444`):
 
 | Aba no App | Modo Operacional | Tecnologia no Host Linux | Tecnologia no App Android |
 | :--- | :--- | :--- | :--- |
 | **Deck** | Grid dinâmico de macros, pastas, controle de mídia/energia e telemetria ao vivo | Engine assíncrona JSON (`~/.config/deck-daemon/profiles/`), `/proc`, `/sys`, D-Bus (`MPRIS2` + `systemd-logind`) | Jetpack Compose com recomposição isolada de `TelemetrySnapshot` (1 Hz), feedback háptico e edição rápida por *long-press* |
-| **Trackpad** | Mouse multi-gesto com curva balística, scroll de 2 dedos e barra de modificadores *sticky* | Três dispositivos virtuais reais no Kernel via `/dev/uinput`: Mouse Relativo, Touch Absoluto (`0..65535`) e Teclado EVDEV completo | Superfície `awaitEachGesture` de 60–120 Hz + `ModifierKeysBar` (`Ctrl`, `Alt`, `Super`, `Shift`, `Esc`, `Tab`, `F1-F12`) |
-| **Tela Remota** | Streaming de vídeo H.264 *zero-latency* + áudio Opus do sistema com toque direto ou cursor relativo | `xdg-desktop-portal` ScreenCast + PipeWire + GStreamer (`vaapih264enc` / `nvh264enc` / `x264enc`) + `pion/webrtc/v4` | `SurfaceViewRenderer` acelerado por hardware (`EglBase`), pinch-to-zoom e `TouchCoordinateMapper` com compensação *letterbox* |
-| **Terminal** | Emulador de terminal Linux completo para emergências (mesmo sem Wayland/X11 ativo) | Sessões `creack/pty` reais (`$SHELL`) com redimensionamento `TIOCSWINSZ` em tempo real | Renderizador nativo Compose `Canvas` 100% offline (VT100/ANSI, 256 cores, TrueColor, `?1049h`) + barra rápida de Sysadmin |
+| **Trackpad** | Mouse multi-gesto com curva balística, scroll de 2 dedos e barra de modificadores *sticky* | Três dispositivos virtuais reais no Kernel via `/dev/uinput`: Mouse Relativo, Touch Absoluto (`0..65535`) e Teclado EVDEV completo + listener **UDP Fast-Lane (`:8443/udp`)** | Superfície `awaitEachGesture` de 60–120 Hz + canal UDP de baixa latência (< 1 ms USB / ~15 ms Wi-Fi) + `ModifierKeysBar` (`Ctrl`, `Alt`, `Super`, `Shift`, `Esc`, `Tab`, `F1-F12`) |
+| **Tela Remota** | Streaming de vídeo contínuo com toque direto absoluto ou cursor relativo | Servidor MJPEG contínuo sob demanda (`:8444/screen.mjpg`) com processo persistente único via captura nativa (KDE KWin D-Bus ScreenShot2 / PipeWire / FFmpeg) | Leitor contínuo `multipart/x-mixed-replace` decodificado em `Bitmap.Config.RGB_565` no Jetpack Compose com zoom, pan e `TouchCoordinateMapper` com compensação *letterbox* |
+| **Terminal** | Emulador de terminal Linux completo | Sessões `creack/pty` reais (`$SHELL`) com redimensionamento `TIOCSWINSZ` e WebSocket binário puro dedicado (`:8444/ws/pty`) | Interface `xterm.js` via WebView acelerada por hardware isolada da UI Thread (VT100/ANSI, cores TrueColor, suporte a mouse) + barra rápida de Sysadmin |
 
 ---
 
-## 2. Estrutura do Monorepo
-
-```text
-.
-├── proto/deck/v1/
-│   ├── deck.proto                  # Fonte única da verdade do protocolo binário (Envelope + Payloads)
-│   └── profile_schema.json         # JSON Schema dos perfis de botões e widgets do Deck
-├── scripts/
-│   ├── gen-proto.sh                # Valida JSON Schema e gera bindings Go a partir do deck.proto
-│   ├── setup-permissions.sh        # Configura módulo uinput, regra udev 0660 e grupo 'input'
-│   └── udev/99-deck-uinput.rules   # Regra udev para acesso sem root ao /dev/uinput
-├── linux-daemon/
-│   ├── cmd/daemon/                 # Servidor principal Linux (mTLS, mDNS, uinput, PTY, Telemetria, WebRTC)
-│   ├── cmd/mock-client/            # Cliente CLI completo para testes e automação de todos os subsistemas
-│   ├── internal/                   # Módulos internos (auth, discovery, server, input, macro, pty, telemetry, dbus, capture, webrtc)
-│   └── pkg/protocol/v1/            # Código Go gerado automaticamente pelo protoc
-└── android-client/
-    └── app/                        # Cliente Android (Kotlin + Jetpack Compose + OkHttp mTLS + WebRTC)
-```
-
----
-
-## 3. Instalação de Dependências no Linux
+## 2. Instalação de Dependências no Linux
 
 ### Arch Linux / Manjaro
 ```bash
 sudo pacman -S --needed \
-  go protobuf jq \
+  go protobuf jq android-tools \
   pipewire pipewire-pulse wireplumber xdg-desktop-portal \
-  gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav gstreamer-vaapi
+  ffmpeg imagemagick
 ```
 
 ### Ubuntu 24.04+ / Debian 12+
 ```bash
 sudo apt update && sudo apt install -y \
-  golang-go protobuf-compiler jq \
+  golang-go protobuf-compiler jq adb \
   pipewire wireplumber xdg-desktop-portal \
-  gstreamer1.0-tools gstreamer1.0-pipewire \
-  gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-  gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-  gstreamer1.0-libav gstreamer1.0-vaapi
+  ffmpeg imagemagick
 ```
 
 ### Fedora 40+
 ```bash
 sudo dnf install -y \
-  golang protobuf-compiler jq \
+  golang protobuf-compiler jq android-tools \
   pipewire wireplumber xdg-desktop-portal \
-  gstreamer1-plugins-base gstreamer1-plugins-good \
-  gstreamer1-plugins-bad-free gstreamer1-plugins-ugly-free \
-  gstreamer1-vaapi
+  ffmpeg ImageMagick
 ```
 
 > **Plugin Go do Protobuf** (necessário apenas se você editar `proto/deck/v1/deck.proto`):
@@ -93,7 +65,7 @@ sudo dnf install -y \
 
 ---
 
-## 4. Configuração de Permissões `udev` (`/dev/uinput`)
+## 3. Configuração de Permissões `udev` (`/dev/uinput`)
 
 Para que o daemon injete eventos reais de mouse e teclado no Kernel Linux **sem rodar como `root`** (funcionando no Wayland, X11, SDDM/GDM e TTY), execute o script incluído no repositório:
 
@@ -115,30 +87,27 @@ ls -l /dev/uinput
 
 ---
 
-## 5. Compilação do Protocolo e do Daemon Linux
+## 4. Compilação do Protocolo e do Daemon Linux
 
-### 5.1. Validar Schema e Gerar Protocol Buffers (Opcional)
+### 4.1. Validar Schema e Gerar Protocol Buffers (Opcional)
 ```bash
 ./scripts/gen-proto.sh
 ```
 
-### 5.2. Compilar e Instalar o `linux-daemon` (a partir da raiz do projeto)
+### 4.2. Compilar e Instalar o `linux-daemon`
 ```bash
-# Opção recomendada: script automático (funciona de qualquer diretório)
-./scripts/install-daemon.sh
-
-# Ou manualmente a partir da raiz do repositório (usando flag -C do Go):
-mkdir -p ~/.local/bin
-go -C linux-daemon test -v -race ./...
-go -C linux-daemon build -o ~/.local/bin/deck-daemon ./cmd/daemon
-go -C linux-daemon build -o ~/.local/bin/deck-mock-client ./cmd/mock-client
+# Opção recomendada: compilação direta e instalação em ~/.local/bin/deck-daemon
+cd linux-daemon
+go test -v ./...
+go build -o ~/.local/bin/deck-daemon ./cmd/daemon
+go build -o ~/.local/bin/deck-mock-client ./cmd/mock-client
 ```
 
 Certifique-se de que `~/.local/bin` está no seu `PATH`.
 
 ---
 
-## 6. Execução do Daemon e Serviço `systemd --user`
+## 5. Execução do Daemon e Serviço `systemd --user`
 
 ### Execução Direta em Terminal
 ```bash
@@ -147,9 +116,10 @@ deck-daemon
 
 Flags suportadas pelo `deck-daemon`:
 - `--config-dir <dir>`: Diretório de certificados, clientes confiáveis e perfis JSON (padrão: `~/.config/deck-daemon`).
-- `--port <int>`: Porta principal do servidor WebSocket mTLS 1.3 (padrão: `8443`).
-- `--pairing-port <int>`: Porta temporária do servidor TLS de pareamento (padrão: `8444`).
-- `--host <ip/hostname>`: IP ou hostname anunciado no QR Code de pareamento (útil para Tailscale/VPN).
+- `--port <int>`: Porta principal do servidor WebSocket mTLS 1.3 e UDP Fast-Lane (padrão: `8443`).
+- `--screen-port <int>`: Porta do servidor de stream MJPEG de tela e terminal PTY `xterm.js` (padrão: `8444`).
+- `--pairing-port <int>`: Porta temporária do servidor TLS de pareamento (padrão: `8445`).
+- `--host <ip/hostname>`: IP ou hostname anunciado no QR Code de pareamento (detectado automaticamente via rota de saída ativa se omitido).
 - `--pair`: Gera um token de uso único válido por **5 minutos**, exibe o **QR Code ANSI** no terminal e abre o endpoint temporário de pareamento.
 - `--print-qr-only`: Quando combinado com `--pair`, imprime o QR Code/JSON e encerra imediatamente.
 
@@ -183,11 +153,11 @@ journalctl --user -u linux-deck-daemon -f
 
 ---
 
-## 7. Pareamento Seguro mTLS 1.3 via QR Code
+## 6. Pareamento Seguro mTLS 1.3 via QR Code
 
 Como o daemon expõe shell `PTY` e dispositivos de input do Kernel, **nenhuma conexão sem certificado X.509 cliente pareado é aceita** na porta `8443`.
 
-1. No host Linux, inicie o daemon em modo de pareamento (se o serviço `systemd` já estiver rodando na porta `8443`, pare-o momentaneamente com `systemctl --user stop linux-deck-daemon` ou use o pareamento na primeira execução):
+1. No host Linux, inicie o daemon em modo de pareamento:
    ```bash
    deck-daemon --pair
    ```
@@ -200,48 +170,42 @@ Como o daemon expõe shell `PTY` e dispositivos de input do Kernel, **nenhuma co
 
 ---
 
-## 8. Conexão via Wi-Fi, Tailscale e Cabo USB (`adb reverse`)
+## 7. Conexão Híbrida Automática: Wi-Fi, Cabo USB (`adb reverse`) e Tailscale
 
-### 8.1. Rede Local Wi-Fi / Ethernet (mDNS Automático)
-- O daemon anuncia automaticamente o serviço `_linuxdeck._tcp` via mDNS na LAN.
-- Basta que o smartphone Android e o PC Linux estejam na mesma sub-rede local e que as portas TCP `8443` (controle mTLS) e `8444` (apenas durante `--pair`) estejam liberadas no firewall local:
-  ```bash
-  # Exemplo UFW (restringindo à rede local)
-  sudo ufw allow from 192.168.0.0/16 to any port 8443,8444 proto tcp
-  ```
+O `deck-daemon` gerencia a infraestrutura de rede de forma totalmente autônoma:
 
-### 8.2. Uso Remoto via Tailscale / WireGuard
-- Para controlar seu Linux de outra rede com segurança ponto a ponto, informe o IP da interface Tailscale (`tailscale ip -4`) ao gerar o QR Code:
-  ```bash
-  deck-daemon --pair --host "$(tailscale ip -4)"
-  ```
-- O WebRTC (`pion/webrtc`) e o canal WebSocket mTLS operarão transparentemente sobre a interface `tailscale0`.
+```text
+[Wi-Fi]        Host: 192.168.1.15 (Portas 8443, 8444, 8445 TCP / 8443 UDP)
+[USB / ADB]    Portas mapeadas no celular -> 127.0.0.1 (Watcher automático ativo)
+```
 
-### 8.3. Uso via Cabo USB com Latência Sub-Milissegundo (`adb reverse`)
-Ideal para redes Wi-Fi congestionadas, ambientes corporativos com isolamento de clientes AP ou máxima fluidez de vídeo WebRTC:
+### 7.1. Conexão Híbrida Transparente (Basta conectar o cabo ou o Wi-Fi)
+- **Watcher USB em Segundo Plano:** O daemon monitora a conexão ADB a cada 3 segundos. Assim que o smartphone for conectado via cabo USB, as portas `8443`, `8444` e `8445` são mapeadas automaticamente via `adb reverse`.
+- **Compatibilidade Multi-Interface no Wi-Fi:** Se o PC estiver conectado ao cabo de rede (Ethernet) e ao Wi-Fi simultaneamente na mesma sub-rede, o daemon ajusta a métrica do NetworkManager para evitar descarte de pacotes pelo filtro reverso do Linux (`rp_filter`).
+- **Alternância Automática no Android:** O app Android gerencia uma lista dinâmica de hosts candidatos (`IP Wi-Fi` $\leftrightarrow$ `127.0.0.1`). Se o Wi-Fi cair ou você conectar o cabo, a transição é imediata e sem interrupção.
 
-1. Conecte o smartphone Android ao PC Linux via cabo USB com **Depuração USB** ativada.
-2. No PC Linux, crie o túnel reverso para as portas de controle e pareamento:
-   ```bash
-   adb reverse tcp:8443 tcp:8443
-   adb reverse tcp:8444 tcp:8444
-   ```
-3. Se ainda não estiver pareado, gere o QR Code apontando para loopback:
-   ```bash
-   deck-daemon --pair --host 127.0.0.1
-   ```
-4. Na tela de pareamento do app Android, toque no atalho **USB (`127.0.0.1`)** — toda a sinalização mTLS 1.3, input `/dev/uinput`, PTY e tráfego local passarão direto pelo barramento USB 2.0/3.0.
+### 7.2. Liberação de Firewall (UFW)
+Se você utiliza firewall local no Linux (UFW), libere as portas com:
+```bash
+sudo ufw allow 8443,8444,8445/tcp && sudo ufw allow 8443/udp
+```
+
+### 7.3. Uso Remoto via Tailscale / WireGuard
+Para controlar seu Linux a partir de redes externas com segurança ponto a ponto:
+```bash
+deck-daemon --pair --host "$(tailscale ip -4)"
+```
 
 ---
 
-## 9. Build e Instalação do Aplicativo Android
+## 8. Build e Instalação do Aplicativo Android
 
 Pré-requisitos de build: **JDK 17+** e **Android SDK (API 35)**. O Gradle compila automaticamente `proto/deck/v1/deck.proto` em classes Kotlin/Java Lite.
 
 ```bash
 cd android-client
 
-# Executa todos os testes unitários JVM (mTLS, Deck, Curva de Aceleração Trackpad, Coordenadas WebRTC e Terminal ANSI)
+# Executa todos os testes unitários JVM
 ./gradlew testDebugUnitTest
 
 # Gera o APK de debug em app/build/outputs/apk/debug/app-debug.apk
@@ -253,13 +217,13 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ---
 
-## 10. Validação End-to-End via CLI (`mock-client`)
+## 9. Validação End-to-End via CLI (`mock-client`)
 
 O binário `deck-mock-client` (`linux-daemon/cmd/mock-client`) permite testar e automatizar todos os subsistemas do daemon sem precisar de um dispositivo Android:
 
 ```bash
 # 1. Parear o cliente CLI usando o token impresso por `deck-daemon --pair`
-deck-mock-client pair --token <TOKEN_HEX> --host 127.0.0.1:8444
+deck-mock-client pair --token <TOKEN_HEX> --host 127.0.0.1:8445
 
 # 2. Medir latência RTT mTLS 1.3 + Protobuf (Ping/Pong)
 deck-mock-client ping --host 127.0.0.1:8443
@@ -281,19 +245,17 @@ deck-mock-client telemetry --count 3
 # 7. Controlar reprodução de mídia MPRIS2 e sessão de energia systemd-logind via D-Bus
 deck-mock-client media --action play-pause
 deck-mock-client power --action lock
-
-# 8. Validar streaming WebRTC H.264/Opus (use DECK_CAPTURE_TEST_SOURCE=1 no daemon em ambientes headless)
-deck-mock-client stream-test --frames 15 --width 1280 --height 720 --fps 60
 ```
 
 ---
 
-## 11. Solução de Problemas (Troubleshooting)
+## 10. Solução de Problemas (Troubleshooting)
 
 * **O cursor não se move no Wayland:**
   Verifique se `ls -l /dev/uinput` pertence ao grupo `input` com permissão `crw-rw----` e se `id -nG` lista o grupo `input`. Reexecute `./scripts/setup-permissions.sh` e refaça login na sessão gráfica.
-* **Tela preta ou pedido de permissão ao abrir "Tela Remota" no Wayland:**
-  Compositores Wayland (GNOME, KDE Plasma, Hyprland, Sway) exigem confirmação inicial do portal `xdg-desktop-portal` (`ScreenCast`) na tela do PC para liberar o stream PipeWire. Para testes automatizados em servidores sem monitor físico, inicie o daemon com `DECK_CAPTURE_TEST_SOURCE=1 deck-daemon`.
-* **Codificação de vídeo usando CPU em vez de GPU:**
-  O pipeline GStreamer detecta automaticamente encoders de hardware nesta ordem de prioridade: `vah264lpenc` / `vaapih264enc` (Intel/AMD VA-API) → `nvh264enc` (NVIDIA NVENC) → `x264enc tune=zerolatency speed-preset=ultrafast` (fallback universal em software). Instale `gstreamer-vaapi` (ou drivers VA-API correspondentes) para habilitar aceleração por GPU.
-
+* **Celular não conecta via Wi-Fi em computadores com cabo de rede e Wi-Fi conectados:**
+  Quando o PC possui placa Ethernet e Wi-Fi conectadas ao mesmo roteador, o Linux pode descartar os pacotes recebidos pela interface sem fio por proteção de caminho reverso (`rp_filter`). O daemon configura automaticamente a métrica de rotas do NetworkManager na inicialização para resolver essa assimetria.
+* **Teclas ou botões de mouse presos no host:**
+  O daemon inclui auto-release automático com watchdog de 5 segundos e rotina `ReleaseAll` em eventos de desconexão, garantindo que modificadores (`Ctrl`, `Alt`, `Shift`) e botões de mouse sejam sempre liberados no `/dev/uinput`.
+* **Portas bloqueadas por firewall:**
+  Certifique-se de que as portas `8443`, `8444` e `8445` (TCP) e `8443` (UDP) estão liberadas para a rede local (`sudo ufw allow 8443,8444,8445/tcp && sudo ufw allow 8443/udp`).

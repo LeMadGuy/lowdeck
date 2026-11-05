@@ -366,7 +366,7 @@ class MtlsKeyManager(
                         "Não foi possível conectar a ${qrPayload.host}:${qrPayload.pairingPort} nem via USB (127.0.0.1:${qrPayload.pairingPort}). " +
                             "Verifique se 'deck-daemon --pair' está rodando no Linux e:\n" +
                             "• Via USB: execute 'adb reverse tcp:${qrPayload.port} tcp:${qrPayload.port} && adb reverse tcp:${qrPayload.pairingPort} tcp:${qrPayload.pairingPort}'\n" +
-                            "• Via Wi-Fi: libere o firewall com 'sudo ufw allow ${qrPayload.port},${qrPayload.pairingPort}/tcp'",
+                            "• Via Wi-Fi: libere o firewall com 'sudo ufw allow ${qrPayload.port},8444,${qrPayload.pairingPort}/tcp'",
                         primaryErr,
                     )
                 }

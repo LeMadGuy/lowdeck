@@ -83,7 +83,7 @@ func (h *Handler) HandleKey(_ context.Context, _ server.ClientSession, env *pb.E
 	var code uint16
 	if ev.KeyCode != 0 {
 		code = uint16(ev.KeyCode)
-	} else if strings.TrimSpace(ev.Key) != "" {
+	} else if ev.Key == " " || strings.TrimSpace(ev.Key) != "" {
 		resolved, err := ResolveKeyName(ev.Key)
 		if err != nil {
 			return fmt.Errorf("input handler resolve key: %w", err)

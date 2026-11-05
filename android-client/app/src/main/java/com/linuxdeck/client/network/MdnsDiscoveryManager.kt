@@ -269,7 +269,21 @@ class MdnsDiscoveryManager(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val addresses = info.hostAddresses
             if (addresses.isNotEmpty()) {
-                return addresses.firstOrNull { it is Inet4Address } ?: addresses.first()
+                val v4Addresses = addresses.filterIsInstance<Inet4Address>()
+                if (v4Addresses.size > 1) {
+                    val port = info.port.takeIf { it in 1..65535 } ?: PairingQrPayload.DEFAULT_CONTROL_PORT
+                    for (addr in v4Addresses) {
+                        try {
+                            java.net.Socket().use { socket ->
+                                socket.connect(java.net.InetSocketAddress(addr, port), 250)
+                                return addr
+                            }
+                        } catch (_: Exception) {
+                            // Interface is unreachable (e.g. isolated NIC); try next
+                        }
+                    }
+                }
+                return v4Addresses.firstOrNull() ?: addresses.first()
             }
         }
         @Suppress("DEPRECATION")

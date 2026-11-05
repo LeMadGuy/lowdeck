@@ -233,3 +233,117 @@ func TestMockInjector_ReleaseAll(t *testing.T) {
 	}
 }
 
+func TestResolveKeyName_Space(t *testing.T) {
+	t.Parallel()
+	code1, err1 := ResolveKeyName(" ")
+	if err1 != nil {
+		t.Fatalf("ResolveKeyName(' ') error: %v", err1)
+	}
+	if code1 != KeySpace {
+		t.Errorf("ResolveKeyName(' ') = %d, want %d", code1, KeySpace)
+	}
+
+	code2, err2 := ResolveKeyName("SPACE")
+	if err2 != nil {
+		t.Fatalf("ResolveKeyName('SPACE') error: %v", err2)
+	}
+	if code2 != KeySpace {
+		t.Errorf("ResolveKeyName('SPACE') = %d, want %d", code2, KeySpace)
+	}
+}
+
+func TestHandleKey_Space(t *testing.T) {
+	t.Parallel()
+	mock := NewMockInjector()
+	h := NewHandler(mock, nil)
+
+	env := &pb.Envelope{
+		Payload: &pb.Envelope_KeyEvent{
+			KeyEvent: &pb.KeyEvent{
+				Key:    " ",
+				Action: pb.ButtonAction_CLICK,
+			},
+		},
+	}
+	if err := h.HandleKey(context.Background(), nil, env); err != nil {
+		t.Fatalf("HandleKey with space failed: %v", err)
+	}
+
+	events := mock.Events()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Kind != "key_action" || events[0].KeyCode != KeySpace {
+		t.Errorf("unexpected event: %+v", events[0])
+	}
+}
+
+func TestAsyncInjector_ReleaseAll(t *testing.T) {
+	t.Parallel()
+	mock := NewMockInjector()
+	async := NewAsyncInjector(mock, 64, nil)
+	defer async.Close()
+
+	if err := async.KeyAction(KeyLeftAlt, pb.ButtonAction_PRESS); err != nil {
+		t.Fatalf("KeyAction error: %v", err)
+	}
+	if err := async.ReleaseAll(); err != nil {
+		t.Fatalf("ReleaseAll error: %v", err)
+	}
+
+	events := mock.Events()
+	if len(events) < 2 {
+		t.Fatalf("expected at least 2 events, got %d", len(events))
+	}
+	last := events[len(events)-1]
+	if last.Kind != "release_all" {
+		t.Fatalf("expected last event release_all, got %s", last.Kind)
+	}
+}
+
+func TestKernelUinput_EmergencyReleaseCodes(t *testing.T) {
+	t.Parallel()
+	// Ensure critical modifier keys are present in stuckKeyCodes (FIX-07)
+	requiredKeys := map[uint16]bool{
+		KeyLeftCtrl:   false,
+		KeyRightCtrl:  false,
+		KeyLeftShift:  false,
+		KeyRightShift: false,
+		KeyLeftAlt:    false,
+		KeyRightAlt:   false,
+		KeyLeftMeta:   false,
+		KeyRightMeta:  false,
+		KeyCapsLock:   false,
+	}
+	for _, code := range stuckKeyCodes {
+		if _, ok := requiredKeys[code]; ok {
+			requiredKeys[code] = true
+		}
+	}
+	for code, found := range requiredKeys {
+		if !found {
+			t.Errorf("stuckKeyCodes missing required code: %d", code)
+		}
+	}
+
+	// Ensure critical mouse buttons are present in stuckMouseButtons (FIX-07)
+	requiredBtns := map[uint16]bool{
+		BtnLeft:   false,
+		BtnRight:  false,
+		BtnMiddle: false,
+		BtnSide:   false,
+		BtnExtra:  false,
+	}
+	for _, btn := range stuckMouseButtons {
+		if _, ok := requiredBtns[btn]; ok {
+			requiredBtns[btn] = true
+		}
+	}
+	for btn, found := range requiredBtns {
+		if !found {
+			t.Errorf("stuckMouseButtons missing required button: 0x%x", btn)
+		}
+	}
+}
+
+

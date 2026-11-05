@@ -83,7 +83,7 @@ func main() {
 		fmt.Printf("Server SHA256: %s\n", payload.ServerFP)
 		fmt.Printf("Expires At:    %s\n", time.Unix(payload.ExpiresAt, 0).Format(time.RFC3339))
 		fmt.Printf("USB (ADB):     adb reverse tcp:%d tcp:%d && adb reverse tcp:%d tcp:%d && adb reverse tcp:%d tcp:%d\n", *port, *port, *screenPort, *screenPort, *pairingPort, *pairingPort)
-		fmt.Printf("Wi-Fi (UFW):   sudo ufw allow %d,%d/tcp\n", *port, *pairingPort)
+		fmt.Printf("Wi-Fi (UFW):   sudo ufw allow %d,%d,%d/tcp && sudo ufw allow %d/udp\n", *port, *screenPort, *pairingPort, *port)
 		fmt.Println("================================================================")
 
 		if *printOnly {
@@ -103,6 +103,7 @@ func main() {
 	// Asynchronous bounded/coalescing queue: the WebSocket read loop never blocks on /dev/uinput writes.
 	inputInjector := input.NewAsyncInjector(input.NewInputInjector(logger), input.DefaultAsyncQueueCapacity, logger)
 	defer func() {
+		_ = inputInjector.ReleaseAll()
 		_ = inputInjector.Close()
 	}()
 	input.NewHandler(inputInjector, logger).Register(router)
@@ -151,6 +152,7 @@ func main() {
 		_ = macroEngine.SendProfileToClient(client)
 	})
 	wsSrv.OnDisconnect(func(client server.ClientSession) {
+		logger.Info("client disconnected; executing uinput emergency release (ReleaseAll)", "client_id", client.ID())
 		ptyMgr.CloseClientSessions(client.ID())
 		webrtcSig.CloseClientStream(client.ID())
 		_ = inputInjector.ReleaseAll()

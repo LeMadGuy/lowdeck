@@ -333,8 +333,9 @@ fun RemoteDesktopScreen(
 
     fun handleImeInput(text: String) {
         for (ch in text) {
+            val keyName = if (ch == ' ') "SPACE" else ch.toString()
             sendEnvelopeOnIo {
-                StickyModifierHelper.buildKeyActionEnvelope(ch.toString(), ButtonAction.CLICK)
+                StickyModifierHelper.buildKeyActionEnvelope(keyName, ButtonAction.CLICK)
             }
         }
     }

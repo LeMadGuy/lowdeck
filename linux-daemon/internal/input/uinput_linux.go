@@ -53,8 +53,31 @@ const (
 
 	// Auto-release stuck keys after 3 seconds (FIX-04)
 	KeyAutoReleaseTimeout = 3 * time.Second
+	// Auto-release stuck mouse buttons after 5 seconds (FIX-07)
+	ButtonAutoReleaseTimeout = 5 * time.Second
 	// Suppression filter for duplicate key/touch input within 20ms (FIX-05)
 	KeyDeduplicateWindow = 20 * time.Millisecond
+)
+
+var (
+	// stuckKeyCodes lists critical modifier keys and locks prone to remaining stuck in compositors (FIX-07).
+	stuckKeyCodes = []uint16{
+		KeyLeftCtrl, KeyRightCtrl,
+		KeyLeftShift, KeyRightShift,
+		KeyLeftAlt, KeyRightAlt,
+		KeyLeftMeta, KeyRightMeta,
+		KeyCapsLock,
+	}
+
+	// stuckMouseButtons lists standard evdev mouse buttons that must be cleared (FIX-07).
+	stuckMouseButtons = []uint16{
+		BtnLeft, BtnRight, BtnMiddle, BtnSide, BtnExtra,
+	}
+
+	// stuckTouchButtons lists standard evdev touch/tablet buttons that must be cleared (FIX-07).
+	stuckTouchButtons = []uint16{
+		BtnTouch, BtnLeft,
+	}
 )
 
 // InputInjector abstracts kernel-level virtual input devices (/dev/uinput)
@@ -112,13 +135,14 @@ type inputEvent struct {
 
 // KernelUinputInjector manages the 3 virtual /dev/uinput devices (Mouse Rel, TouchScreen Abs, Keyboard).
 type KernelUinputInjector struct {
-	mu          sync.Mutex
-	relMouse    *os.File
-	absTouch    *os.File
-	keyboard    *os.File
-	closed      bool
-	pressedKeys map[uint16]*time.Timer
-	lastPress   map[uint16]time.Time
+	mu             sync.Mutex
+	relMouse       *os.File
+	absTouch       *os.File
+	keyboard       *os.File
+	closed         bool
+	pressedKeys    map[uint16]*time.Timer
+	lastPress      map[uint16]time.Time
+	pressedButtons map[uint16]*time.Timer
 }
 
 // NewInputInjector attempts to initialize the 3 kernel /dev/uinput devices.
@@ -165,11 +189,12 @@ func NewKernelUinputInjector() (*KernelUinputInjector, error) {
 	}
 
 	return &KernelUinputInjector{
-		relMouse:    relMouse,
-		absTouch:    absTouch,
-		keyboard:    keyboard,
-		pressedKeys: make(map[uint16]*time.Timer),
-		lastPress:   make(map[uint16]time.Time),
+		relMouse:       relMouse,
+		absTouch:       absTouch,
+		keyboard:       keyboard,
+		pressedKeys:    make(map[uint16]*time.Timer),
+		lastPress:      make(map[uint16]time.Time),
+		pressedButtons: make(map[uint16]*time.Timer),
 	}, nil
 }
 
@@ -215,7 +240,63 @@ func (k *KernelUinputInjector) MouseButton(button pb.MouseButton, action pb.Butt
 	if err != nil {
 		return err
 	}
-	return emitButtonOrKey(k.relMouse, btnCode, action)
+
+	switch action {
+	case pb.ButtonAction_PRESS:
+		// Cancel any existing auto-release timer for this button
+		if t, ok := k.pressedButtons[btnCode]; ok && t != nil {
+			t.Stop()
+		}
+
+		// Schedule watchdog auto-release after 5 seconds (FIX-07)
+		code := btnCode
+		k.pressedButtons[code] = time.AfterFunc(ButtonAutoReleaseTimeout, func() {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			if k.closed {
+				return
+			}
+			if _, stillPressed := k.pressedButtons[code]; stillPressed {
+				delete(k.pressedButtons, code)
+				_ = writeEvents(k.relMouse, []inputEvent{
+					{Type: evKey, Code: code, Value: 0},
+					{Type: evSyn, Code: synReport, Value: 0},
+				})
+			}
+		})
+
+		return writeEvents(k.relMouse, []inputEvent{
+			{Type: evKey, Code: btnCode, Value: 1},
+			{Type: evSyn, Code: synReport, Value: 0},
+		})
+
+	case pb.ButtonAction_RELEASE:
+		if t, ok := k.pressedButtons[btnCode]; ok && t != nil {
+			t.Stop()
+		}
+		delete(k.pressedButtons, btnCode)
+
+		return writeEvents(k.relMouse, []inputEvent{
+			{Type: evKey, Code: btnCode, Value: 0},
+			{Type: evSyn, Code: synReport, Value: 0},
+		})
+
+	case pb.ButtonAction_CLICK, pb.ButtonAction_BUTTON_ACTION_UNSPECIFIED:
+		if t, ok := k.pressedButtons[btnCode]; ok && t != nil {
+			t.Stop()
+		}
+		delete(k.pressedButtons, btnCode)
+
+		return writeEvents(k.relMouse, []inputEvent{
+			{Type: evKey, Code: btnCode, Value: 1},
+			{Type: evSyn, Code: synReport, Value: 0},
+			{Type: evKey, Code: btnCode, Value: 0},
+			{Type: evSyn, Code: synReport, Value: 0},
+		})
+
+	default:
+		return fmt.Errorf("input uinput: unsupported button action %v", action)
+	}
 }
 
 func (k *KernelUinputInjector) Scroll(dx, dy int32) error {
@@ -314,7 +395,7 @@ func (k *KernelUinputInjector) KeyAction(keyCode uint16, action pb.ButtonAction)
 	}
 }
 
-// ReleaseAll forces release of all currently pressed keys (FIX-04).
+// ReleaseAll forces immediate release of all currently pressed keys, mouse buttons, and modifier keys (FIX-04, FIX-07).
 func (k *KernelUinputInjector) ReleaseAll() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -322,20 +403,48 @@ func (k *KernelUinputInjector) ReleaseAll() error {
 		return nil
 	}
 
-	var events []inputEvent
+	// 1. Release any tracked pressed keyboard keys
+	var kbEvents []inputEvent
 	for code, t := range k.pressedKeys {
 		if t != nil {
 			t.Stop()
 		}
-		events = append(events, inputEvent{Type: evKey, Code: code, Value: 0})
+		kbEvents = append(kbEvents, inputEvent{Type: evKey, Code: code, Value: 0})
 	}
 	k.pressedKeys = make(map[uint16]*time.Timer)
 	k.lastPress = make(map[uint16]time.Time)
 
-	if len(events) > 0 {
-		events = append(events, inputEvent{Type: evSyn, Code: synReport, Value: 0})
-		return writeEvents(k.keyboard, events)
+	// 2. Guarantee release of critical modifiers to unstick host physical keyboard (FIX-07)
+	for _, code := range stuckKeyCodes {
+		kbEvents = append(kbEvents, inputEvent{Type: evKey, Code: code, Value: 0})
 	}
+	kbEvents = append(kbEvents, inputEvent{Type: evSyn, Code: synReport, Value: 0})
+	_ = writeEvents(k.keyboard, kbEvents)
+
+	// 3. Release any tracked pressed mouse buttons and guarantee release of standard mouse buttons (FIX-07)
+	var mouseEvents []inputEvent
+	for code, t := range k.pressedButtons {
+		if t != nil {
+			t.Stop()
+		}
+		mouseEvents = append(mouseEvents, inputEvent{Type: evKey, Code: code, Value: 0})
+	}
+	k.pressedButtons = make(map[uint16]*time.Timer)
+
+	for _, code := range stuckMouseButtons {
+		mouseEvents = append(mouseEvents, inputEvent{Type: evKey, Code: code, Value: 0})
+	}
+	mouseEvents = append(mouseEvents, inputEvent{Type: evSyn, Code: synReport, Value: 0})
+	_ = writeEvents(k.relMouse, mouseEvents)
+
+	// 4. Guarantee release of touch buttons on absTouch device (FIX-07)
+	var touchEvents []inputEvent
+	for _, code := range stuckTouchButtons {
+		touchEvents = append(touchEvents, inputEvent{Type: evKey, Code: code, Value: 0})
+	}
+	touchEvents = append(touchEvents, inputEvent{Type: evSyn, Code: synReport, Value: 0})
+	_ = writeEvents(k.absTouch, touchEvents)
+
 	return nil
 }
 
@@ -375,11 +484,22 @@ func (k *KernelUinputInjector) TypeText(text string) error {
 
 func (k *KernelUinputInjector) Close() error {
 	k.mu.Lock()
+	if k.closed {
+		k.mu.Unlock()
+		return nil
+	}
+	k.mu.Unlock()
+
+	// Perform emergency release of all keys and buttons BEFORE destroying the kernel devices (FIX-07).
+	_ = k.ReleaseAll()
+
+	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.closed {
 		return nil
 	}
 	k.closed = true
+
 	for _, t := range k.pressedKeys {
 		if t != nil {
 			t.Stop()
@@ -387,6 +507,14 @@ func (k *KernelUinputInjector) Close() error {
 	}
 	k.pressedKeys = nil
 	k.lastPress = nil
+
+	for _, t := range k.pressedButtons {
+		if t != nil {
+			t.Stop()
+		}
+	}
+	k.pressedButtons = nil
+
 	destroyDevice(k.relMouse)
 	destroyDevice(k.absTouch)
 	destroyDevice(k.keyboard)

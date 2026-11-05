@@ -249,5 +249,6 @@ Os agentes devem executar os arquivos de especificação abaixo em ordem e marca
 | **FIX-03** | `docs/fixes/FIX-03-PERSISTENT-SCREEN.md` (ou `fix-08.md`) | Loop infinito no WebRTC e ausência de sinal de vida na Tela Remota com stream MJPEG contínuo. | `[x] Concluído` |
 | **FIX-04** | `docs/fixes/fix-04.md` | Teclado do host travado por teclas presas no `/dev/uinput`; auto-release de 3s e registro de chaves até `0x2ff`. | `[x] Concluído` |
 | **FIX-05** | `docs/fixes/fix-05.md` | Repetição aleatória de caracteres no terminal xterm.js (debounce de 20ms no client e daemon). | `[x] Concluído` |
-| **FIX-06** | `docs/fixes/fix-06.md` | Tela preta no MJPEG remoto (conversão explícita `yuv420p` no FFmpeg e leitor por `Content-Length` no Android). | `[x] Concluído` |
-| **FIX-07** | Diagnóstico & Captura Wayland Nativa | Captura do desktop no KDE Plasma Wayland via interface DBus `org.kde.KWin.ScreenShot2` eliminando frames pretos do Xwayland rootless. | `[x] Concluído` |
+| **FIX-06** | `docs/fixes/fix-06.md` | Tela preta no MJPEG remoto (captura nativa KDE Plasma Wayland via DBus ScreenShot2 e leitor `Content-Length` no Android). | `[x] Concluído` |
+| **FIX-07** | `docs/fixes/fix-07.md` | Auto-release de teclas/botões (`ReleaseAll`) e ciclo de vida limpo do uinput prevenindo travamento do teclado/mouse físico do host. | `[x] Concluído` |
+| **FIX-08** | Diagnóstico & Resolução Wi-Fi / Multi-NIC | Conexão Wi-Fi bloqueada por assimetria de rotas (Ethernet+Wi-Fi na mesma subnet `192.168.1.0/24`), `rp_filter=1`, detecção de IP outbound e resolução mDNS multi-endereço. | `[x] Concluído` |

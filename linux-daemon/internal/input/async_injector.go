@@ -153,9 +153,8 @@ func (a *AsyncInjector) TypeText(text string) error {
 }
 
 func (a *AsyncInjector) ReleaseAll() error {
-	return a.enqueue(asyncOp{kind: opDiscrete, run: func(inj InputInjector) error {
-		return inj.ReleaseAll()
-	}})
+	a.Flush()
+	return a.inner.ReleaseAll()
 }
 
 // Flush blocks until every operation enqueued before the call has been injected.

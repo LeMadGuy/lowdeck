@@ -425,6 +425,13 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 }
 
 func detectOutboundHost() string {
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err == nil {
+		defer conn.Close()
+		if localAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok && !localAddr.IP.IsLoopback() {
+			return localAddr.IP.String()
+		}
+	}
 	addrs, err := net.InterfaceAddrs()
 	if err == nil {
 		for _, addr := range addrs {

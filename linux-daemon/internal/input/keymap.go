@@ -266,6 +266,9 @@ var modifierCodes = map[uint16]bool{
 // ResolveKeyName translates a human-readable key identifier (e.g. "SUPER", "ESC", "KEY_A", "F5")
 // into a Linux evdev keycode.
 func ResolveKeyName(name string) (uint16, error) {
+	if name == " " {
+		return KeySpace, nil
+	}
 	cleaned := strings.ToUpper(strings.TrimSpace(name))
 	cleaned = strings.TrimPrefix(cleaned, "KEY_")
 	if cleaned == "" {
